@@ -1,0 +1,23 @@
+{
+  "name": "Manhwa Translator Environment",
+  // استخدم أحدث صورة رسمية لـ Python 3 من Microsoft.
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+
+  "customizations": {
+    "vscode": {
+      // قائمة بالإضافات التي سيتم تثبيتها تلقائيًا في VS Code.
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  },
+
+  // هذا هو الأمر السحري: سيتم تشغيله بعد إنشاء الحاوية.
+  // سيقوم بتثبيت كل المكتبات الموجودة في ملف requirements.txt.
+  "postCreateCommand": "pip install --user -r requirements.txt",
+
+  // يمكنك إضافة إعدادات أخرى هنا إذا احتجت.
+  "forwardPorts": [],
+  "remoteUser": "vscode"
+}
