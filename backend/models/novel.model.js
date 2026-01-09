@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 
 const chapterSchema = new mongoose.Schema({
@@ -12,7 +11,7 @@ const novelSchema = new mongoose.Schema({
     title: { type: String, required: true, index: true },
     titleEn: { type: String },
     author: { type: String, required: true }, 
-    authorEmail: { type: String, index: true }, 
+    authorEmail: { type: String }, // تم إزالة index: true من هنا لمنع التكرار
     cover: { type: String }, 
     description: { type: String },
     category: { type: String, index: true },
@@ -48,7 +47,7 @@ const novelSchema = new mongoose.Schema({
 novelSchema.index({ title: 'text', author: 'text' });
 novelSchema.index({ views: -1 });
 novelSchema.index({ lastChapterUpdate: -1 });
-novelSchema.index({ authorEmail: 1 });
+novelSchema.index({ authorEmail: 1 }); // أبقينا على هذا الفهرس لأنه أكثر وضوحاً في التنظيم
 
 const Novel = mongoose.model('Novel', novelSchema);
 module.exports = Novel;
