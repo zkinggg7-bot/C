@@ -246,6 +246,24 @@ app.post('/api/scraper/receive', async (req, res) => {
         // 3. البحث عن الرواية أو إنشاؤها
         let novel = await Novel.findOne({ title: novelData.title });
 
+        // 🔥🔥🔥 CLOUDINARY UPLOAD LOGIC 🔥🔥🔥
+        // إذا كان هناك رابط صورة ولم يكن رابط Cloudinary، نقوم برفعه للحصول على رابط ثابت
+        if (novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
+            try {
+                await logScraper(`🖼️ جاري رفع غلاف الرواية إلى Cloudinary...`, 'info');
+                const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
+                    folder: 'novels_covers',
+                    resource_type: 'image'
+                });
+                // تحديث الرابط بالرابط الجديد الآمن
+                novelData.cover = uploadRes.secure_url;
+                await logScraper(`✅ تم رفع الغلاف بنجاح: ${novelData.cover}`, 'success');
+            } catch (imgErr) {
+                await logScraper(`⚠️ فشل رفع الغلاف إلى Cloudinary: ${imgErr.message}`, 'warning');
+                // نستمر باستخدام الرابط الأصلي في حالة الفشل
+            }
+        }
+
         if (!novel) {
             // إنشاء رواية جديدة
             await logScraper(`✨ جاري إنشاء رواية جديدة: ${novelData.title}`, 'info');
@@ -267,12 +285,17 @@ app.post('/api/scraper/receive', async (req, res) => {
             // تحديث البيانات إذا كانت موجودة
             await logScraper(`🔄 الرواية موجودة بالفعل، جاري تحديث البيانات...`, 'warning');
             if (!novel.cover && novelData.cover) novel.cover = novelData.cover;
+            if (novelData.cover && novelData.cover.includes('cloudinary') && novel.cover !== novelData.cover) {
+                 // Update cover if new one is cloudinary and different
+                 novel.cover = novelData.cover;
+            }
             if (!novel.description && novelData.description) novel.description = novelData.description;
             // ضمان تحديث المؤلف إذا كان مفقوداً
             if (!novel.authorEmail) {
                 novel.author = user.name;
                 novel.authorEmail = user.email;
             }
+            await novel.save();
         }
 
         // 4. معالجة الفصول وإضافتها
@@ -313,10 +336,15 @@ app.post('/api/scraper/receive', async (req, res) => {
                 await novel.save();
                 await logScraper(`✅ تم حفظ ${addedCount} فصل جديد في قاعدة البيانات`, 'success');
             } else {
-                await logScraper(`⚠️ جميع الفصول المرسلة موجودة مسبقاً`, 'warning');
+                if (chapters.length > 0) {
+                   await logScraper(`⚠️ تم استلام ${chapters.length} فصل، لكنها موجودة مسبقاً`, 'info');
+                }
             }
         } else {
-            await logScraper(`⚠️ لم يتم استلام أي فصول في هذا الطلب`, 'warning');
+            // لا حاجة لطباعة تحذير إذا كانت القائمة فارغة (قد تكون مرحلة أولية لإنشاء الرواية فقط)
+            if (chapters && chapters.length === 0) {
+                await logScraper(`ℹ️ تم تحديث بيانات الرواية الأساسية`, 'info');
+            }
         }
 
         res.json({ success: true, novelId: novel._id, message: "Data processed successfully" });
