@@ -44,6 +44,16 @@ const NovelLibrary = require('./models/novelLibrary.model.js');
 const Settings = require('./models/settings.model.js');
 const Comment = require('./models/comment.model.js'); // 🔥 Import Comment Model
 
+// 🔥 MODEL FOR SCRAPER LOGS (للتتبع المباشر)
+const ScraperLogSchema = new mongoose.Schema({
+    message: String,
+    type: { type: String, default: 'info' }, // info, success, error, warning
+    timestamp: { type: Date, default: Date.now }
+});
+// حذف النموذج القديم إذا وجد لتجنب التعارض
+if (mongoose.models.ScraperLog) delete mongoose.models.ScraperLog;
+const ScraperLog = mongoose.model('ScraperLog', ScraperLogSchema);
+
 const app = express();
 
 // 🔥 قائمة الأدمن المسموح بهم حصراً 🔥
@@ -78,14 +88,31 @@ async function connectToDatabase() {
     }
 }
 
+// الاتصال بقاعدة البيانات عند بدء التشغيل (مهم لـ Railway)
+connectToDatabase();
+
 app.use(async (req, res, next) => {
-    try {
+    if (!cachedDb) {
         await connectToDatabase();
-        next();
-    } catch (error) {
-        res.status(500).json({ error: 'Database connection failed' });
     }
+    next();
 });
+
+// Helper Function for Logging to DB
+async function logScraper(message, type = 'info') {
+    try {
+        console.log(`[Scraper Log] ${message}`);
+        await ScraperLog.create({ message, type, timestamp: new Date() });
+        // Keep only last 100 logs to save space
+        const count = await ScraperLog.countDocuments();
+        if (count > 100) {
+            const first = await ScraperLog.findOne().sort({ timestamp: 1 });
+            if (first) await ScraperLog.deleteOne({ _id: first._id });
+        }
+    } catch (e) {
+        console.error("Log error", e);
+    }
+}
 
 function verifyToken(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -125,6 +152,181 @@ async function checkNovelStatus(novel) {
     }
     return novel;
 }
+
+// =========================================================
+// 📜 SCRAPER LOGS API
+// =========================================================
+
+// مسح السجلات
+app.delete('/api/scraper/logs', async (req, res) => {
+    try {
+        await ScraperLog.deleteMany({});
+        res.json({ message: "Logs cleared" });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// جلب السجلات
+app.get('/api/scraper/logs', async (req, res) => {
+    try {
+        const logs = await ScraperLog.find().sort({ timestamp: -1 }).limit(100);
+        res.json(logs);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ✅ نقطة البداية (Init) - لضمان استجابة فورية
+app.post('/api/scraper/init', async (req, res) => {
+    try {
+        const { url, userEmail } = req.body;
+        await ScraperLog.deleteMany({}); // تنظيف القديم
+        
+        if (userEmail) {
+            const user = await User.findOne({ email: userEmail });
+            if (user) await logScraper(`👤 المستخدم: ${user.name}`, 'info');
+        }
+
+        await logScraper(`🚀 بدء عملية استيراد جديدة...`, 'info');
+        await logScraper(`🔗 الرابط المستهدف: ${url}`, 'info');
+        await logScraper(`⏳ جاري الاتصال بخدمة السحب (Python Scraper)...`, 'warning');
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ✅ تسجيل خطأ من العميل (App) إذا فشل الاتصال بالسكرابر
+app.post('/api/scraper/log', async (req, res) => {
+    try {
+        const { message, type } = req.body;
+        await logScraper(message, type || 'info');
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// =========================================================
+// 🕷️ SCRAPER WEBHOOK (بوابة استقبال البيانات من السكرابر)
+// =========================================================
+app.post('/api/scraper/receive', async (req, res) => {
+    const secret = req.headers['authorization'] || req.headers['x-api-secret'];
+    const VALID_SECRET = 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
+    
+    if (secret !== VALID_SECRET) {
+        await logScraper("محاولة وصول غير مصرح بها للـ Webhook", 'error');
+        return res.status(403).json({ message: "Unauthorized: Invalid Secret" });
+    }
+
+    try {
+        const { adminEmail, novelData, chapters, error } = req.body;
+
+        // إذا أرسل السكرابر خطأ
+        if (error) {
+            await logScraper(`❌ خطأ من السكرابر: ${error}`, 'error');
+            return res.status(400).json({ message: error });
+        }
+
+        await logScraper(`📥 وصل رد من السكرابر! تحليل البيانات...`, 'info');
+
+        if (!adminEmail || !novelData || !novelData.title) {
+            await logScraper("❌ بيانات ناقصة في الطلب", 'error');
+            return res.status(400).json({ message: "Missing required data" });
+        }
+
+        // 2. البحث عن المستخدم (الأدمن) لربط الرواية به
+        const user = await User.findOne({ email: adminEmail });
+        if (!user) {
+            await logScraper(`❌ المستخدم ${adminEmail} غير موجود في النظام`, 'error');
+            return res.status(404).json({ message: `User with email ${adminEmail} not found` });
+        }
+
+        // 3. البحث عن الرواية أو إنشاؤها
+        let novel = await Novel.findOne({ title: novelData.title });
+
+        if (!novel) {
+            // إنشاء رواية جديدة
+            await logScraper(`✨ جاري إنشاء رواية جديدة: ${novelData.title}`, 'info');
+            novel = new Novel({
+                title: novelData.title,
+                cover: novelData.cover,
+                description: novelData.description,
+                author: user.name, // ربط الرواية باسم المستخدم
+                authorEmail: user.email,
+                category: novelData.category || 'أخرى',
+                tags: novelData.tags || [],
+                status: 'مستمرة',
+                chapters: [],
+                views: 0
+            });
+            await novel.save();
+            await logScraper(`✅ تم إنشاء صفحة الرواية بنجاح`, 'success');
+        } else {
+            // تحديث البيانات إذا كانت موجودة
+            await logScraper(`🔄 الرواية موجودة بالفعل، جاري تحديث البيانات...`, 'warning');
+            if (!novel.cover && novelData.cover) novel.cover = novelData.cover;
+            if (!novel.description && novelData.description) novel.description = novelData.description;
+            // ضمان تحديث المؤلف إذا كان مفقوداً
+            if (!novel.authorEmail) {
+                novel.author = user.name;
+                novel.authorEmail = user.email;
+            }
+        }
+
+        // 4. معالجة الفصول وإضافتها
+        if (chapters && Array.isArray(chapters) && chapters.length > 0) {
+            let addedCount = 0;
+            // await logScraper(`📚 جاري معالجة ${chapters.length} فصل...`, 'info');
+
+            for (const chap of chapters) {
+                // التأكد من عدم تكرار الفصل
+                const existingChap = novel.chapters.find(c => c.number === chap.number);
+
+                if (!existingChap) {
+                    // أ) حفظ المحتوى في Firestore (للقراءة)
+                    if (firestore) {
+                        await firestore.collection('novels').doc(novel._id.toString())
+                            .collection('chapters').doc(chap.number.toString()).set({
+                                title: chap.title,
+                                content: chap.content, // المحتوى النصي من السكرابر
+                                lastUpdated: new Date()
+                            });
+                    }
+
+                    // ب) إضافة بيانات الفصل الوصفية في MongoDB
+                    novel.chapters.push({
+                        number: chap.number,
+                        title: chap.title,
+                        createdAt: new Date(),
+                        views: 0
+                    });
+                    addedCount++;
+                }
+            }
+
+            if (addedCount > 0) {
+                // ترتيب الفصول وحفظ الرواية
+                novel.chapters.sort((a, b) => a.number - b.number);
+                novel.lastChapterUpdate = new Date();
+                await novel.save();
+                await logScraper(`✅ تم حفظ ${addedCount} فصل جديد في قاعدة البيانات`, 'success');
+            } else {
+                await logScraper(`⚠️ جميع الفصول المرسلة موجودة مسبقاً`, 'warning');
+            }
+        } else {
+            await logScraper(`⚠️ لم يتم استلام أي فصول في هذا الطلب`, 'warning');
+        }
+
+        res.json({ success: true, novelId: novel._id, message: "Data processed successfully" });
+
+    } catch (error) {
+        console.error("Scraper Receiver Error:", error);
+        await logScraper(`❌ خطأ فادح في الخادم: ${error.message}`, 'error');
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // =========================================================
 // 🎭 NOVEL REACTIONS API
@@ -1221,7 +1423,7 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
 const oauth2Client = new OAuth2Client(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    "https://chatzeusb.vercel.app/auth/google/callback" 
+    "https://c-production-3db6.up.railway.app/auth/google/callback" 
 );
 
 app.get('/auth/google', (req, res) => {
@@ -1289,11 +1491,11 @@ app.get('/auth/google/callback', async (req, res) => {
             const deepLink = state === 'mobile' ? `aplcionszeus://auth?token=${token}` : `${state}?token=${token}`;
             res.redirect(deepLink);
         } else {
-            res.redirect(`https://chatzeusb.vercel.app/?token=${token}`);
+            res.redirect(`https://c-production-3db6.up.railway.app/?token=${token}`);
         }
     } catch (error) {
         console.error('Auth error:', error);
-        res.redirect('https://chatzeusb.vercel.app/?auth_error=true');
+        res.redirect('https://c-production-3db6.up.railway.app/?auth_error=true');
     }
 });
 
@@ -1302,4 +1504,8 @@ app.get('/api/user', verifyToken, async (req, res) => {
     res.json({ loggedIn: true, user: user });
 });
 
-module.exports = app;
+// 🔥🔥🔥🔥 تشغيل الخادم على Railway (الاستماع للمنفذ) 🔥🔥🔥🔥
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});
