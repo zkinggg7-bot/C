@@ -104,6 +104,37 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
+    // 🔍 CHECK EXISTING CHAPTERS (NEW)
+    // =========================================================
+    app.post('/api/scraper/check-chapters', async (req, res) => {
+        const secret = req.headers['authorization'] || req.headers['x-api-secret'];
+        const VALID_SECRET = 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
+        
+        if (secret !== VALID_SECRET) return res.status(403).json({ message: "Unauthorized" });
+
+        try {
+            const { title } = req.body;
+            // البحث عن الرواية بالاسم العربي المطابق
+            const novel = await Novel.findOne({ title: title });
+            
+            if (novel) {
+                // إرجاع أرقام الفصول الموجودة فقط
+                const existingChapters = novel.chapters.map(c => c.number);
+                await logScraper(`✅ الرواية موجودة مسبقاً: ${title} (${existingChapters.length} فصل)`, 'success');
+                return res.json({ 
+                    exists: true, 
+                    chapters: existingChapters 
+                });
+            } else {
+                return res.json({ exists: false, chapters: [] });
+            }
+        } catch (e) {
+            console.error("Check Chapters Error:", e);
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
     // 🕷️ SCRAPER WEBHOOK (بوابة استقبال البيانات من السكرابر)
     // =========================================================
     app.post('/api/scraper/receive', async (req, res) => {
@@ -116,7 +147,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
 
         try {
-            const { adminEmail, novelData, chapters, error } = req.body;
+            const { adminEmail, novelData, chapters, error, skipMetadataUpdate } = req.body;
 
             // إذا أرسل السكرابر خطأ
             if (error) {
@@ -124,7 +155,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(400).json({ message: error });
             }
 
-            await logScraper(`📥 وصل رد من السكرابر! تحليل البيانات...`, 'info');
+            // await logScraper(`📥 وصل رد من السكرابر! تحليل البيانات...`, 'info');
 
             if (!adminEmail || !novelData || !novelData.title) {
                 await logScraper("❌ بيانات ناقصة في الطلب", 'error');
@@ -143,7 +174,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
             // 🔥🔥🔥 CLOUDINARY UPLOAD LOGIC 🔥🔥🔥
             // إذا كان هناك رابط صورة ولم يكن رابط Cloudinary، نقوم برفعه للحصول على رابط ثابت
-            if (novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
+            // فقط إذا لم نكن في وضع "تخطي التحديث" (skipMetadataUpdate)
+            if (!skipMetadataUpdate && novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
                 try {
                     // await logScraper(`🖼️ جاري رفع الغلاف: ${novelData.cover}`, 'info');
                     const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
@@ -177,18 +209,23 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 await novel.save();
                 await logScraper(`✅ تم إنشاء صفحة الرواية بنجاح`, 'success');
             } else {
-                // تحديث البيانات إذا كانت موجودة
-                await logScraper(`🔄 تحديث بيانات الرواية...`, 'info');
-                if (novelData.cover && (novelData.cover.includes('cloudinary') || !novel.cover)) {
-                     novel.cover = novelData.cover;
+                // تحديث البيانات إذا كانت موجودة (فقط إذا لم يطلب التخطي)
+                if (!skipMetadataUpdate) {
+                    await logScraper(`🔄 تحديث بيانات الرواية (غلاف/وصف)...`, 'info');
+                    if (novelData.cover && (novelData.cover.includes('cloudinary') || !novel.cover)) {
+                         novel.cover = novelData.cover;
+                    }
+                    if (!novel.description && novelData.description) novel.description = novelData.description;
+                    
+                    // ضمان تحديث المؤلف إذا كان مفقوداً
+                    if (!novel.authorEmail) {
+                        novel.author = user.name;
+                        novel.authorEmail = user.email;
+                    }
+                    await novel.save();
+                } else {
+                     // await logScraper(`ℹ️ تخطي تحديث الميتاداتا (الرواية موجودة)`, 'info');
                 }
-                if (!novel.description && novelData.description) novel.description = novelData.description;
-                // ضمان تحديث المؤلف إذا كان مفقوداً
-                if (!novel.authorEmail) {
-                    novel.author = user.name;
-                    novel.authorEmail = user.email;
-                }
-                await novel.save();
             }
 
             // 4. معالجة الفصول وإضافتها
@@ -230,7 +267,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     await logScraper(`✅ تم حفظ ${addedCount} فصل جديد`, 'success');
                 } else {
                     if (chapters.length > 0) {
-                       await logScraper(`ℹ️ الفصول المستلمة موجودة مسبقاً (${chapters.length})`, 'info');
+                       // await logScraper(`ℹ️ الفصول المستلمة موجودة مسبقاً (${chapters.length})`, 'info');
                     }
                 }
             } 
