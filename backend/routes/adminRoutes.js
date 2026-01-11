@@ -20,22 +20,19 @@ const NovelLibrary = require('../models/novelLibrary.model.js');
 const Settings = require('../models/settings.model.js');
 const Comment = require('../models/comment.model.js');
 
-// 🔥 MODEL FOR SCRAPER LOGS (للتتبع المباشر) - Defined here as it's admin/scraper specific
+// 🔥 MODEL FOR SCRAPER LOGS
 const ScraperLogSchema = new mongoose.Schema({
     message: String,
-    type: { type: String, default: 'info' }, // info, success, error, warning
+    type: { type: String, default: 'info' }, 
     timestamp: { type: Date, default: Date.now }
 });
-// حذف النموذج القديم إذا وجد لتجنب التعارض
 if (mongoose.models.ScraperLog) delete mongoose.models.ScraperLog;
 const ScraperLog = mongoose.model('ScraperLog', ScraperLogSchema);
 
-// Helper Function for Logging to DB
 async function logScraper(message, type = 'info') {
     try {
         console.log(`[Scraper Log] ${message}`);
         await ScraperLog.create({ message, type, timestamp: new Date() });
-        // Keep only last 100 logs to save space
         const count = await ScraperLog.countDocuments();
         if (count > 100) {
             const first = await ScraperLog.findOne().sort({ timestamp: 1 });
@@ -51,8 +48,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // =========================================================
     // 📜 SCRAPER LOGS API
     // =========================================================
-
-    // مسح السجلات
     app.delete('/api/scraper/logs', async (req, res) => {
         try {
             await ScraperLog.deleteMany({});
@@ -62,7 +57,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // جلب السجلات
     app.get('/api/scraper/logs', async (req, res) => {
         try {
             const logs = await ScraperLog.find().sort({ timestamp: -1 }).limit(100);
@@ -72,27 +66,24 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // ✅ نقطة البداية (Init) - لضمان استجابة فورية
     app.post('/api/scraper/init', async (req, res) => {
         try {
             const { url, userEmail } = req.body;
-            await ScraperLog.deleteMany({}); // تنظيف القديم
+            await ScraperLog.deleteMany({}); 
             
             if (userEmail) {
                 const user = await User.findOne({ email: userEmail });
                 if (user) await logScraper(`👤 المستخدم: ${user.name}`, 'info');
             }
 
-            await logScraper(`🚀 بدء عملية استيراد جديدة...`, 'info');
-            await logScraper(`🔗 الرابط المستهدف: ${url}`, 'info');
-            await logScraper(`⏳ جاري الاتصال بخدمة السحب (Python Scraper)...`, 'warning');
+            await logScraper(`🚀 بدء عملية الفحص الذكي (Probe Mode)...`, 'info');
+            await logScraper(`🔗 الرابط: ${url}`, 'info');
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
 
-    // ✅ تسجيل خطأ من العميل (App) إذا فشل الاتصال بالسكرابر
     app.post('/api/scraper/log', async (req, res) => {
         try {
             const { message, type } = req.body;
@@ -104,7 +95,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🔍 CHECK EXISTING CHAPTERS (NEW)
+    // 🔍 CHECK EXISTING CHAPTERS
     // =========================================================
     app.post('/api/scraper/check-chapters', async (req, res) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -114,91 +105,68 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
         try {
             const { title } = req.body;
-            // البحث عن الرواية بالاسم العربي المطابق
             const novel = await Novel.findOne({ title: title });
             
             if (novel) {
-                // إرجاع أرقام الفصول الموجودة فقط
                 const existingChapters = novel.chapters.map(c => c.number);
-                await logScraper(`✅ الرواية موجودة مسبقاً: ${title} (${existingChapters.length} فصل)`, 'success');
-                return res.json({ 
-                    exists: true, 
-                    chapters: existingChapters 
-                });
+                await logScraper(`✅ الرواية موجودة (${existingChapters.length} فصل). جاري فحص النواقص والتحديثات...`, 'success');
+                return res.json({ exists: true, chapters: existingChapters });
             } else {
                 return res.json({ exists: false, chapters: [] });
             }
         } catch (e) {
-            console.error("Check Chapters Error:", e);
             res.status(500).json({ error: e.message });
         }
     });
 
     // =========================================================
-    // 🕷️ SCRAPER WEBHOOK (بوابة استقبال البيانات من السكرابر)
+    // 🕷️ SCRAPER WEBHOOK
     // =========================================================
     app.post('/api/scraper/receive', async (req, res) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
         const VALID_SECRET = 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
         
-        if (secret !== VALID_SECRET) {
-            await logScraper("محاولة وصول غير مصرح بها للـ Webhook", 'error');
-            return res.status(403).json({ message: "Unauthorized: Invalid Secret" });
-        }
+        if (secret !== VALID_SECRET) return res.status(403).json({ message: "Unauthorized" });
 
         try {
             const { adminEmail, novelData, chapters, error, skipMetadataUpdate } = req.body;
 
-            // إذا أرسل السكرابر خطأ
             if (error) {
-                await logScraper(`❌ خطأ من السكرابر: ${error}`, 'error');
+                await logScraper(`❌ توقف: ${error}`, 'error');
                 return res.status(400).json({ message: error });
             }
 
-            // await logScraper(`📥 وصل رد من السكرابر! تحليل البيانات...`, 'info');
-
             if (!adminEmail || !novelData || !novelData.title) {
-                await logScraper("❌ بيانات ناقصة في الطلب", 'error');
-                return res.status(400).json({ message: "Missing required data" });
+                return res.status(400).json({ message: "Missing data" });
             }
 
-            // 2. البحث عن المستخدم (الأدمن) لربط الرواية به
             const user = await User.findOne({ email: adminEmail });
-            if (!user) {
-                await logScraper(`❌ المستخدم ${adminEmail} غير موجود في النظام`, 'error');
-                return res.status(404).json({ message: `User with email ${adminEmail} not found` });
-            }
+            if (!user) return res.status(404).json({ message: "User not found" });
 
-            // 3. البحث عن الرواية أو إنشاؤها
             let novel = await Novel.findOne({ title: novelData.title });
 
-            // 🔥🔥🔥 CLOUDINARY UPLOAD LOGIC 🔥🔥🔥
-            // إذا كان هناك رابط صورة ولم يكن رابط Cloudinary، نقوم برفعه للحصول على رابط ثابت
-            // فقط إذا لم نكن في وضع "تخطي التحديث" (skipMetadataUpdate)
+            // Image Upload Logic (Cloudinary)
             if (!skipMetadataUpdate && novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
                 try {
-                    // await logScraper(`🖼️ جاري رفع الغلاف: ${novelData.cover}`, 'info');
                     const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
                         folder: 'novels_covers',
-                        resource_type: 'auto', // Auto detect type
-                        timeout: 60000 // 60s timeout
+                        resource_type: 'auto',
+                        timeout: 60000 
                     });
                     novelData.cover = uploadRes.secure_url;
-                    await logScraper(`✅ تم رفع الغلاف بنجاح`, 'success');
+                    await logScraper(`✅ تم رفع الغلاف`, 'success');
                 } catch (imgErr) {
-                    await logScraper(`⚠️ فشل رفع الغلاف: ${imgErr.message} - سيتم استخدام الرابط الأصلي.`, 'warning');
-                    // لا نوقف العملية، نستمر بالرابط الأصلي
+                    await logScraper(`⚠️ فشل رفع الغلاف (سيستخدم الرابط الأصلي)`, 'warning');
                 }
             }
 
             if (!novel) {
-                // إنشاء رواية جديدة
-                await logScraper(`✨ جاري إنشاء رواية جديدة: ${novelData.title}`, 'info');
+                // New Novel
                 novel = new Novel({
                     title: novelData.title,
                     cover: novelData.cover,
                     description: novelData.description,
-                    author: user.name, // ربط الرواية باسم المستخدم
+                    author: user.name, 
                     authorEmail: user.email,
                     category: novelData.category || 'أخرى',
                     tags: novelData.tags || [],
@@ -207,48 +175,38 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     views: 0
                 });
                 await novel.save();
-                await logScraper(`✅ تم إنشاء صفحة الرواية بنجاح`, 'success');
+                await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
             } else {
-                // تحديث البيانات إذا كانت موجودة (فقط إذا لم يطلب التخطي)
+                // Update Metadata if allowed
                 if (!skipMetadataUpdate) {
-                    await logScraper(`🔄 تحديث بيانات الرواية (غلاف/وصف)...`, 'info');
                     if (novelData.cover && (novelData.cover.includes('cloudinary') || !novel.cover)) {
                          novel.cover = novelData.cover;
                     }
                     if (!novel.description && novelData.description) novel.description = novelData.description;
-                    
-                    // ضمان تحديث المؤلف إذا كان مفقوداً
                     if (!novel.authorEmail) {
                         novel.author = user.name;
                         novel.authorEmail = user.email;
                     }
                     await novel.save();
-                } else {
-                     // await logScraper(`ℹ️ تخطي تحديث الميتاداتا (الرواية موجودة)`, 'info');
                 }
             }
 
-            // 4. معالجة الفصول وإضافتها
+            // Save Chapters
             if (chapters && Array.isArray(chapters) && chapters.length > 0) {
                 let addedCount = 0;
-                // await logScraper(`📚 جاري معالجة ${chapters.length} فصل...`, 'info');
-
                 for (const chap of chapters) {
-                    // التأكد من عدم تكرار الفصل
                     const existingChap = novel.chapters.find(c => c.number === chap.number);
-
                     if (!existingChap) {
-                        // أ) حفظ المحتوى في Firestore (للقراءة)
+                        // Firestore
                         if (firestore) {
                             await firestore.collection('novels').doc(novel._id.toString())
                                 .collection('chapters').doc(chap.number.toString()).set({
                                     title: chap.title,
-                                    content: chap.content, // المحتوى النصي من السكرابر
+                                    content: chap.content,
                                     lastUpdated: new Date()
                                 });
                         }
-
-                        // ب) إضافة بيانات الفصل الوصفية في MongoDB
+                        // MongoDB Meta
                         novel.chapters.push({
                             number: chap.number,
                             title: chap.title,
@@ -260,30 +218,23 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 }
 
                 if (addedCount > 0) {
-                    // ترتيب الفصول وحفظ الرواية
                     novel.chapters.sort((a, b) => a.number - b.number);
                     novel.lastChapterUpdate = new Date();
                     await novel.save();
                     await logScraper(`✅ تم حفظ ${addedCount} فصل جديد`, 'success');
-                } else {
-                    if (chapters.length > 0) {
-                       // await logScraper(`ℹ️ الفصول المستلمة موجودة مسبقاً (${chapters.length})`, 'info');
-                    }
                 }
             } 
 
-            res.json({ success: true, novelId: novel._id, message: "Data processed successfully" });
+            res.json({ success: true, novelId: novel._id });
 
         } catch (error) {
             console.error("Scraper Receiver Error:", error);
-            await logScraper(`❌ خطأ فادح في الخادم: ${error.message}`, 'error');
+            await logScraper(`❌ خطأ خادم: ${error.message}`, 'error');
             res.status(500).json({ error: error.message });
         }
     });
 
-    // =========================================================
-    // 🚀 BULK UPLOAD API (النشر المتعدد)
-    // =========================================================
+    // Bulk Upload (Kept same)
     app.post('/api/admin/chapters/bulk-upload', verifyAdmin, upload.single('zip'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ message: "No ZIP file uploaded" });
@@ -314,23 +265,18 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     const chapterNumber = parseInt(fileName);
 
                     if (isNaN(chapterNumber)) {
-                        errors.push(`تخطي الملف ${entry.entryName}: الاسم ليس رقماً`);
+                        errors.push(`تخطي ${entry.entryName}: الاسم ليس رقماً`);
                         continue;
                     }
 
                     const fullText = zip.readAsText(entry, 'utf8');
                     const lines = fullText.split('\n');
-                    
                     if (lines.length === 0) continue;
 
                     const firstLine = lines[0].trim();
                     let chapterTitle = firstLine;
-                    
                     const colonIndex = firstLine.indexOf(':');
-                    if (colonIndex > -1) {
-                        chapterTitle = firstLine.substring(colonIndex + 1).trim();
-                    }
-                    
+                    if (colonIndex > -1) chapterTitle = firstLine.substring(colonIndex + 1).trim();
                     if (!chapterTitle) chapterTitle = firstLine;
 
                     const content = lines.slice(1).join('\n').trim();
@@ -341,8 +287,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                             content: content,
                             lastUpdated: new Date()
                         });
-                    } else {
-                        throw new Error("Firebase not configured");
                     }
 
                     const chapterMeta = { 
@@ -358,12 +302,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     } else {
                         novel.chapters.push(chapterMeta);
                     }
-
                     successCount++;
-
                 } catch (err) {
-                    console.error(`Error processing ${entry.entryName}:`, err);
-                    errors.push(`خطأ في ملف ${entry.entryName}`);
+                    errors.push(`خطأ في ${entry.entryName}`);
                 }
             }
 
@@ -374,23 +315,14 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 await novel.save();
             }
 
-            res.json({ 
-                message: `تمت المعالجة. نجح: ${successCount}، فشل: ${errors.length}`,
-                errors: errors,
-                successCount
-            });
+            res.json({ message: `نجح: ${successCount}`, errors, successCount });
 
         } catch (error) {
-            console.error("Bulk Upload Error:", error);
             res.status(500).json({ error: error.message });
         }
     });
 
-    // =========================================================
-    // 👑 USERS MANAGEMENT API (ADMIN ONLY)
-    // =========================================================
-
-    // Get All Users
+    // Users Management (Kept same)
     app.get('/api/admin/users', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
@@ -401,13 +333,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Update User Role
     app.put('/api/admin/users/:id/role', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
             const { role } = req.body;
-            if (!['user', 'contributor', 'admin'].includes(role)) return res.status(400).json({message: "Invalid role"});
-            
             const user = await User.findByIdAndUpdate(req.params.id, { role }, { new: true });
             res.json(user);
         } catch (error) {
@@ -415,24 +344,20 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Delete User
     app.delete('/api/admin/users/:id', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
             const targetUserId = req.params.id;
             const deleteContent = req.query.deleteContent === 'true'; 
-
             if (targetUserId === req.user.id) return res.status(400).json({message: "Cannot delete yourself"});
 
             const targetUser = await User.findById(targetUserId);
             if (!targetUser) return res.status(404).json({ message: "User not found" });
 
-            // 🔥🔥🔥 Important: Delete Comments when user is deleted 🔥🔥🔥
             await Comment.deleteMany({ user: targetUserId });
 
             if (deleteContent) {
                 const userNovels = await Novel.find({ authorEmail: targetUser.email });
-                
                 if (firestore && userNovels.length > 0) {
                     for (const novel of userNovels) {
                         try {
@@ -443,12 +368,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                                 await Promise.all(deletePromises);
                             }
                             await firestore.collection('novels').doc(novel._id.toString()).delete();
-                        } catch (err) {
-                            console.error(`Error deleting firestore for novel ${novel._id}`, err);
-                        }
+                        } catch (err) {}
                     }
                 }
-
                 await Novel.deleteMany({ authorEmail: targetUser.email });
             }
 
@@ -456,51 +378,32 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             await NovelLibrary.deleteMany({ user: targetUserId });
             await Settings.deleteMany({ user: targetUserId });
             
-            res.json({ 
-                message: deleteContent 
-                    ? "User and their works/comments deleted successfully" 
-                    : "User and comments deleted successfully (works preserved)" 
-            });
+            res.json({ message: "User deleted" });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
     });
 
-    // Block User Comments
     app.put('/api/admin/users/:id/block-comment', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
             const { block } = req.body;
             const user = await User.findByIdAndUpdate(req.params.id, { isCommentBlocked: block }, { new: true });
-            res.json({ message: block ? "User blocked from comments" : "User unblocked", user });
+            res.json({ message: "Updated", user });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
     });
 
-    // =========================================================
-    // 📝 ADMIN API: الروايات
-    // =========================================================
+    // Novels Management (Kept same)
     app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
         try {
             const { title, cover, description, category, tags, status } = req.body;
-            
-            const authorName = req.user.name;
-            const authorEmail = req.user.email;
-
             const newNovel = new Novel({
-                title, 
-                cover, 
-                description, 
-                author: authorName, 
-                authorEmail: authorEmail,
-                category, 
-                tags,
-                chapters: [], 
-                views: 0, 
-                status: status || 'مستمرة'
+                title, cover, description, 
+                author: req.user.name, authorEmail: req.user.email,
+                category, tags, status: status || 'مستمرة'
             });
-
             await newNovel.save();
             res.json(newNovel);
         } catch (error) {
@@ -511,23 +414,18 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     app.put('/api/admin/novels/:id', verifyAdmin, async (req, res) => {
         try {
             const { title, cover, description, category, tags, status } = req.body;
-            
             const novel = await Novel.findById(req.params.id);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية تعديل هذه الرواية" });
-                }
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
             }
 
             let updateData = { title, cover, description, category, tags, status };
-
             if (req.user.role === 'admin') {
                 updateData.author = req.user.name;
                 updateData.authorEmail = req.user.email;
             }
-            
             const updated = await Novel.findByIdAndUpdate(req.params.id, updateData, { new: true });
             res.json(updated);
         } catch (error) {
@@ -541,33 +439,25 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية حذف هذه الرواية" });
-                }
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
             }
 
             if (firestore) {
                 try {
                     const chaptersRef = firestore.collection('novels').doc(novelId).collection('chapters');
                     const snapshot = await chaptersRef.get();
-                    
                     if (!snapshot.empty) {
                         const deletePromises = snapshot.docs.map(doc => doc.ref.delete());
                         await Promise.all(deletePromises);
                     }
-                    
                     await firestore.collection('novels').doc(novelId).delete();
-                    console.log(`✅ Deleted Firestore content for novel: ${novelId}`);
-                } catch (fsError) {
-                    console.error("❌ Firestore deletion error:", fsError);
-                }
+                } catch (fsError) {}
             }
 
             await Novel.findByIdAndDelete(novelId);
             await NovelLibrary.deleteMany({ novelId: novelId });
-            
-            res.json({ message: "Deleted successfully (DB + Content)" });
+            res.json({ message: "Deleted" });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
@@ -576,14 +466,11 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     app.post('/api/admin/chapters', verifyAdmin, async (req, res) => {
         try {
             const { novelId, number, title, content } = req.body;
-            
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية الإضافة لهذه الرواية" });
-                }
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
             }
 
             if (firestore) {
@@ -592,25 +479,21 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 });
             }
 
-            const existingChapterIndex = novel.chapters.findIndex(c => c.number == number);
+            const existingIndex = novel.chapters.findIndex(c => c.number == number);
             const chapterMeta = { number: Number(number), title, createdAt: new Date(), views: 0 };
 
-            if (existingChapterIndex > -1) {
-                novel.chapters[existingChapterIndex] = { ...novel.chapters[existingChapterIndex].toObject(), ...chapterMeta };
+            if (existingIndex > -1) {
+                novel.chapters[existingIndex] = { ...novel.chapters[existingIndex].toObject(), ...chapterMeta };
             } else {
                 novel.chapters.push(chapterMeta);
             }
             
             novel.lastChapterUpdate = new Date();
-            
-            if (novel.status === 'متوقفة') {
-                novel.status = 'مستمرة';
-            }
-
+            if (novel.status === 'متوقفة') novel.status = 'مستمرة';
             novel.markModified('chapters');
             await novel.save();
 
-            res.json({ message: "Chapter saved successfully" });
+            res.json({ message: "Chapter saved" });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
@@ -620,14 +503,11 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             const { novelId, number } = req.params;
             const { title, content } = req.body;
-
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية تعديل هذا الفصل" });
-                }
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
             }
 
             if (firestore) {
@@ -636,14 +516,13 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 });
             }
 
-            const chapterIndex = novel.chapters.findIndex(c => c.number == number);
-            if (chapterIndex > -1) {
-                novel.chapters[chapterIndex].title = title;
+            const idx = novel.chapters.findIndex(c => c.number == number);
+            if (idx > -1) {
+                novel.chapters[idx].title = title;
                 novel.markModified('chapters');
                 await novel.save();
             }
-
-            res.json({ message: "Chapter updated successfully" });
+            res.json({ message: "Updated" });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
@@ -655,10 +534,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
-            if (req.user.role !== 'admin') {
-                if (novel.authorEmail !== req.user.email) {
-                    return res.status(403).json({ message: "لا تملك صلاحية حذف هذا الفصل" });
-                }
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
             }
             
             novel.chapters = novel.chapters.filter(c => c.number != number);
@@ -667,8 +544,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             if (firestore) {
                 await firestore.collection('novels').doc(novelId).collection('chapters').doc(number.toString()).delete();
             }
-
-            res.json({ message: "Chapter deleted" });
+            res.json({ message: "Deleted" });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
