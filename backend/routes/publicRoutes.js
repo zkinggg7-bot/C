@@ -351,17 +351,28 @@ module.exports = function(app, verifyToken, upload) {
             let totalViews = 0;
             let myWorks = [];
 
+            // Project only necessary fields for works list to avoid large payload
             myWorks = await Novel.find({ 
                 $or: [
                     { authorEmail: targetUser.email },
                     { author: { $regex: new RegExp(`^${targetUser.name}$`, 'i') } } 
                 ]
-            });
+            }).select('title cover status views chapters');
             
             myWorks.forEach(novel => {
                 addedChapters += (novel.chapters ? novel.chapters.length : 0);
                 totalViews += (novel.views || 0);
             });
+
+            // Map works to lightweight objects
+            const lightWorks = myWorks.map(novel => ({
+                _id: novel._id,
+                title: novel.title,
+                cover: novel.cover,
+                status: novel.status,
+                views: novel.views,
+                chaptersCount: novel.chapters ? novel.chapters.length : 0
+            }));
             
             res.json({
                 user: {
@@ -378,7 +389,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks
+                myWorks: lightWorks
             });
 
         } catch (error) {
@@ -445,11 +456,6 @@ module.exports = function(app, verifyToken, upload) {
                 matchStage["chapters.0"] = { $exists: true };
             }
 
-            let pipeline = [
-                { $match: matchStage },
-                { $addFields: { chaptersCount: { $size: { $ifNull: ["$chapters", []] } } } }
-            ];
-
             let sortStage = {};
             if (sort === 'chapters_desc') sortStage = { chaptersCount: -1 };
             else if (sort === 'chapters_asc') sortStage = { chaptersCount: 1 };
@@ -466,11 +472,34 @@ module.exports = function(app, verifyToken, upload) {
                  sortStage = { chaptersCount: -1 };
             }
 
-            pipeline.push({ $sort: sortStage });
-
-            const result = await Novel.aggregate([
+            // 🔥 OPTIMIZATION: Do not load the entire chapters array!
+            // We use $project to exclude 'chapters' and only calculate its size
+            // This massively reduces the payload size (from MBs to KBs)
+            
+            const pipeline = [
                 { $match: matchStage },
-                { $addFields: { chaptersCount: { $size: { $ifNull: ["$chapters", []] } } } },
+                { 
+                    $project: {
+                        title: 1,
+                        cover: 1,
+                        author: 1,
+                        category: 1,
+                        tags: 1,
+                        status: 1,
+                        views: 1,
+                        dailyViews: 1,
+                        weeklyViews: 1,
+                        monthlyViews: 1,
+                        lastChapterUpdate: 1,
+                        createdAt: 1,
+                        rating: 1,
+                        // Calculate count without returning the array
+                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
+                        // For 'latest updates', we might need the last chapter's meta data
+                        // Get ONLY the last element of the array
+                        chapters: { $slice: ["$chapters", -1] } 
+                    }
+                },
                 { $sort: sortStage },
                 {
                     $facet: {
@@ -478,7 +507,9 @@ module.exports = function(app, verifyToken, upload) {
                         data: [{ $skip: skip }, { $limit: limitNum }]
                     }
                 }
-            ]);
+            ];
+
+            const result = await Novel.aggregate(pipeline);
 
             const novelsData = result[0].data;
             const totalCount = result[0].metadata[0] ? result[0].metadata[0].total : 0;
@@ -503,6 +534,12 @@ module.exports = function(app, verifyToken, upload) {
             
             const novel = novelDoc.toObject();
             novel.chaptersCount = novel.chapters ? novel.chapters.length : 0;
+            
+            // Note: For Detail screen, we usually need the full chapter list (titles/numbers),
+            // but not the CONTENT of the chapters. The Model schema defines chapters as
+            // { number, title, createdAt, views }. Content is stored in Firestore or inside ZIPs usually.
+            // If `chapterSchema` in Mongoose has `content`, we MUST exclude it here too.
+            // Assuming `chapterSchema` only has metadata based on `novel.model.js`.
             
             res.json(novel);
         } catch (error) {
