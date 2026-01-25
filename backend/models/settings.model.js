@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 
 const settingsSchema = new mongoose.Schema({
@@ -15,9 +16,12 @@ const settingsSchema = new mongoose.Schema({
         apiKeys: [{ key: String, status: String }]
     }],
     customPrompt: { type: String, default: '' },
-    fontSize: { type: Number, default: 18 }
+    fontSize: { type: Number, default: 18 },
+    // 🔥 New field for storing globally banned words/phrases for cleanup
+    globalBlocklist: [{ type: String }] 
 }, { timestamps: true });
 
 const Settings = mongoose.model('Settings', settingsSchema);
 
 module.exports = Settings;
+    
