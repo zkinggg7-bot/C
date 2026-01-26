@@ -43,6 +43,11 @@ async function logScraper(message, type = 'info') {
     }
 }
 
+// Helper to escape regex special characters
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
@@ -53,7 +58,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     app.get('/api/admin/cleaner', verifyAdmin, async (req, res) => {
         try {
             // We use the admin's settings to store the global blacklist for now
-            // or we could use a dedicated document. Let's use the Admin's settings doc.
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) {
                 settings = new Settings({ user: req.user.id });
@@ -68,7 +72,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Add Word & Execute Clean
     app.post('/api/admin/cleaner', verifyAdmin, async (req, res) => {
         try {
-            const { word } = req.body;
+            const { word } = req.body; 
             if (!word) return res.status(400).json({ message: "Word required" });
 
             // 1. Save to Blacklist
@@ -80,18 +84,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 await settings.save();
             }
 
-            // 2. Execute Cleanup on ALL Novels
-            // This iterates through all novels and replaces the text in content.
-            // Note: If using Firestore for content, this needs to update Firestore.
-            // Assuming current logic uses MongoDB for chapter metadata but content might be here or Firestore.
-            // Based on 'novel.model.js', content isn't in schema, implying it's fetched or stored elsewhere.
-            // However, the scraper route implies content can be in Firestore OR sent to client.
-            
-            // NOTE: The previous code implies content is stored in Firestore if available, otherwise?
-            // The scraper logs show "chapter content" logic. 
-            // If content is stored in MongoDB chapters array (schema doesn't show it but flexible schema might), we update it.
-            // If content is in Firestore, we update it.
-
+            // 2. Execute Cleanup on ALL Novels (Batch Job)
             let updatedCount = 0;
 
             if (firestore) {
@@ -100,13 +93,31 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                 novelsSnapshot.forEach(doc => {
                     const novelId = doc.id;
-                    // We need to iterate subcollection 'chapters'
                     const p = firestore.collection('novels').doc(novelId).collection('chapters').get().then(chaptersSnap => {
                         chaptersSnap.forEach(chapDoc => {
-                            const data = chapDoc.data();
-                            if (data.content && data.content.includes(word)) {
-                                const newContent = data.content.split(word).join(''); // Global replace
-                                chapDoc.ref.update({ content: newContent });
+                            let content = chapDoc.data().content || "";
+                            let modified = false;
+
+                            if (word.includes('\n') || word.includes('\r')) {
+                                // --- BLOCK REMOVAL MODE ---
+                                if (content.includes(word)) {
+                                    content = content.split(word).join('');
+                                    modified = true;
+                                }
+                            } else {
+                                // --- KEYWORD LINE REMOVAL MODE ---
+                                const escapedKeyword = escapeRegExp(word);
+                                const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
+                                
+                                if (regex.test(content)) {
+                                    content = content.replace(regex, '');
+                                    modified = true;
+                                }
+                            }
+
+                            if (modified) {
+                                content = content.replace(/^\s*[\r\n]/gm, ''); // Clean empty lines
+                                chapDoc.ref.update({ content: content });
                                 updatedCount++;
                             }
                         });
@@ -115,9 +126,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 });
                 await Promise.all(batchPromises);
             }
-
-            // Also check MongoDB if schema was modified to hold content (unlikely based on provided files, but for safety)
-            // If content is NOT in MongoDB, this part is skipped or fast.
 
             res.json({ message: "Cleanup executed", updatedCount });
         } catch (e) {
@@ -137,17 +145,33 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 settings.globalBlocklist[index] = word;
                 await settings.save();
                 
-                // Re-run cleaner for the new word
+                // Re-run cleaner for the new word (Batch)
                 if (firestore) {
                     const novelsSnapshot = await firestore.collection('novels').get();
                     const batchPromises = [];
                     novelsSnapshot.forEach(doc => {
                         const p = firestore.collection('novels').doc(doc.id).collection('chapters').get().then(chaptersSnap => {
                             chaptersSnap.forEach(chapDoc => {
-                                const data = chapDoc.data();
-                                if (data.content && data.content.includes(word)) {
-                                    const newContent = data.content.split(word).join('');
-                                    chapDoc.ref.update({ content: newContent });
+                                let content = chapDoc.data().content || "";
+                                let modified = false;
+
+                                if (word.includes('\n') || word.includes('\r')) {
+                                    if (content.includes(word)) {
+                                        content = content.split(word).join('');
+                                        modified = true;
+                                    }
+                                } else {
+                                    const escapedKeyword = escapeRegExp(word);
+                                    const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
+                                    if (regex.test(content)) {
+                                        content = content.replace(regex, '');
+                                        modified = true;
+                                    }
+                                }
+
+                                if (modified) {
+                                    content = content.replace(/^\s*[\r\n]/gm, '');
+                                    chapDoc.ref.update({ content: content });
                                 }
                             });
                         });
