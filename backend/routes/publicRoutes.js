@@ -16,6 +16,12 @@ const User = require('../models/user.model.js');
 const Novel = require('../models/novel.model.js');
 const NovelLibrary = require('../models/novelLibrary.model.js'); 
 const Comment = require('../models/comment.model.js');
+const Settings = require('../models/settings.model.js'); // 🔥 Added Settings Import
+
+// Helper to escape regex special characters
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Helper to check and update status automatically
 async function checkNovelStatus(novel) {
@@ -562,6 +568,7 @@ module.exports = function(app, verifyToken, upload) {
 
             let content = "لا يوجد محتوى.";
             
+            // Fetch Content from Firestore
             if (firestore) {
                 const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
                 const docSnap = await docRef.get();
@@ -569,6 +576,47 @@ module.exports = function(app, verifyToken, upload) {
                     content = docSnap.data().content;
                 }
             }
+
+            // =========================================================
+            // 🧹 GLOBAL CLEANER (Dynamic Runtime Check)
+            // =========================================================
+            try {
+                // Find ANY settings document that has a blocklist. 
+                // In production, you might want to fetch by specific Admin ID, 
+                // but fetching non-empty lists works for this purpose.
+                const adminSettings = await Settings.findOne({ globalBlocklist: { $exists: true, $not: { $size: 0 } } });
+                
+                if (adminSettings && adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
+                    const blocklist = adminSettings.globalBlocklist;
+                    
+                    blocklist.forEach(word => {
+                        if (!word) return;
+                        
+                        if (word.includes('\n') || word.includes('\r')) {
+                            // BLOCK REMOVAL MODE (Exact match of multi-line block)
+                            // We escape regex chars just in case, but standard replace might be safer for blocks
+                            // Use split/join for global replacement of exact block
+                            content = content.split(word).join('');
+                        } else {
+                            // LINE/PARAGRAPH REMOVAL MODE (Keyword in line)
+                            // Regex: Start of line -> anything -> keyword -> anything -> End of line
+                            // Flags: g (global), m (multiline - makes ^ and $ match start/end of lines)
+                            const escapedKeyword = escapeRegExp(word);
+                            const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
+                            content = content.replace(regex, '');
+                        }
+                    });
+
+                    // Cleanup: Remove excess empty lines created by deletion
+                    // Replace 3+ newlines with 2, or just cleanup generic empty lines
+                    content = content.replace(/^\s*[\r\n]/gm, ''); // Remove purely empty lines
+                    content = content.replace(/\n\s*\n/g, '\n\n'); // Max 1 empty line between paragraphs
+                }
+            } catch (cleanerErr) {
+                console.error("Global cleaner runtime error:", cleanerErr);
+                // Continue serving content even if cleaner fails, or maybe log it
+            }
+            // =========================================================
 
             res.json({ 
                 ...chapterMeta.toObject(), 
