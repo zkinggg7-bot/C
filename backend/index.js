@@ -223,10 +223,13 @@ app.get('/api/user', verifyToken, async (req, res) => {
 // 🔗 MOUNT ROUTES
 // =========================================================
 
-// تحميل مسارات الإدارة (Admin, Scraper, Bulk Upload)
+// تحميل مسارات الإدارة
 require('./routes/adminRoutes')(app, verifyToken, verifyAdmin, upload);
 
-// تحميل المسارات العامة (Public, Reader, Comments, Library)
+// 🔥 تحميل مسارات المترجم الذكي الجديدة 🔥
+require('./routes/translatorRoutes')(app, verifyToken, verifyAdmin);
+
+// تحميل المسارات العامة
 require('./routes/publicRoutes')(app, verifyToken, upload);
 
 const PORT = process.env.PORT || 3000;
