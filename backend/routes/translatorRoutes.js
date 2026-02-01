@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Novel = require('../models/novel.model.js');
@@ -202,12 +203,24 @@ ${translatedText.substring(0, 8000)}
                     throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
                 }
 
-                // 🔥 FIX 2: Update MongoDB Metadata using findOneAndUpdate to bypass versioning issues
+                // C. Update MongoDB Metadata and Status
+                
+                const updates = { 
+                    $set: { 
+                        "chapters.$.title": `الفصل ${chapterNum}`,
+                        "lastChapterUpdate": new Date() // Mark update time
+                    } 
+                };
+
+                // 🔥 AUTO-PUBLISH LOGIC: If status was 'خاصة', switch to 'مستمرة'
+                if (freshNovel.status === 'خاصة') {
+                    updates.$set.status = 'مستمرة';
+                    await pushLog(jobId, `🔓 تم تغيير حالة الرواية إلى 'عامه' لأن فصل تم ترجمته`, 'success');
+                }
+
                 await Novel.findOneAndUpdate(
                     { _id: freshNovel._id, "chapters.number": chapterNum },
-                    { 
-                        $set: { "chapters.$.title": `الفصل ${chapterNum}` } 
-                    }
+                    updates
                 );
 
                 // D. Update Job
@@ -228,10 +241,13 @@ ${translatedText.substring(0, 8000)}
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
                         
-                        // Update Mongo Metadata fallback
+                        // Fallback Mongo Update
+                        const updates = { $set: { "chapters.$.title": `الفصل ${chapterNum}` } };
+                        if (freshNovel.status === 'خاصة') updates.$set.status = 'مستمرة';
+
                         await Novel.findOneAndUpdate(
                             { _id: freshNovel._id, "chapters.number": chapterNum },
-                            { $set: { "chapters.$.title": `الفصل ${chapterNum}` } }
+                            updates
                         );
 
                         await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
