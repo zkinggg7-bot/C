@@ -430,7 +430,7 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // 🔥 MODIFIED: List Novels with Privacy Check
+    // 🔥 MODIFIED: List Novels with Privacy Check AND Correct Last Chapter Display
     app.get('/api/novels', async (req, res) => {
         try {
             const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
@@ -478,6 +478,25 @@ module.exports = function(app, verifyToken, upload) {
                  sortStage = { chaptersCount: -1 };
             }
 
+            // 🔥 LOGIC TO FILTER RAW CHAPTERS FROM THE PREVIEW & COUNT
+            let chaptersFilter = "$chapters"; // Default: all chapters (for Admin)
+
+            if (role !== 'admin') {
+                // For users, filter out chapters containing "Chapter" in title
+                chaptersFilter = {
+                    $filter: {
+                        input: "$chapters",
+                        as: "ch",
+                        cond: {
+                            $eq: [
+                                { $regexMatch: { input: "$$ch.title", regex: "chapter", options: "i" } },
+                                false
+                            ]
+                        }
+                    }
+                };
+            }
+
             const pipeline = [
                 { $match: matchStage },
                 { 
@@ -495,8 +514,10 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
-                        chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                        chapters: { $slice: ["$chapters", -1] } 
+                        // 🔥 Calculate count based on FILTERED list
+                        chaptersCount: { $size: { $ifNull: [chaptersFilter, []] } },
+                        // 🔥 Slice only the last item from the FILTERED list
+                        chapters: { $slice: [chaptersFilter, -1] } 
                     }
                 },
                 { $sort: sortStage },
