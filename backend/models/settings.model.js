@@ -16,12 +16,14 @@ const settingsSchema = new mongoose.Schema({
         apiKeys: [{ key: String, status: String }]
     }],
     customPrompt: { type: String, default: '' },
+    // 🔥 New: Translator Specific Settings
+    translatorModel: { type: String, default: 'gemini-2.5-flash' }, // Default as requested
+    translatorExtractPrompt: { type: String, default: '' },
+    
     fontSize: { type: Number, default: 18 },
-    // 🔥 New field for storing globally banned words/phrases for cleanup
     globalBlocklist: [{ type: String }] 
 }, { timestamps: true });
 
 const Settings = mongoose.model('Settings', settingsSchema);
 
 module.exports = Settings;
-    
