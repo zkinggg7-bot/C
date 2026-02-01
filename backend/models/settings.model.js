@@ -16,9 +16,11 @@ const settingsSchema = new mongoose.Schema({
         apiKeys: [{ key: String, status: String }]
     }],
     customPrompt: { type: String, default: '' },
-    // 🔥 New: Translator Specific Settings
-    translatorModel: { type: String, default: 'gemini-2.5-flash' }, // Default as requested
+    
+    // 🔥 Translator Specific Settings
+    translatorModel: { type: String, default: 'gemini-2.5-flash' }, 
     translatorExtractPrompt: { type: String, default: '' },
+    translatorApiKeys: [{ type: String }], // Global Keys for Translator
     
     fontSize: { type: Number, default: 18 },
     globalBlocklist: [{ type: String }] 
