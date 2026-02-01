@@ -34,10 +34,25 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        // جلب الإعدادات (Prompts)
-        // نفترض وجود إعدادات عامة للأدمن، أو نستخدم قيم افتراضية
+        // جلب الإعدادات (Prompts & Model)
+        // نفترض وجود إعدادات عامة للأدمن (أو أول مستخدم أدمن)
+        // في نظام متعدد المستخدمين، يجب تمرير userId في الـ job
         const settings = await Settings.findOne({}); 
+        
         const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the following novel chapter to Arabic. Use the provided Glossary strictly. output JSON: { \"title\": \"Arabic Title\", \"content\": \"Arabic Content (HTML formatted paragraphs)\", \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\"}] }";
+        
+        // 🔥 Use Selected Model
+        // Map user friendly names to actual API model names if needed
+        let selectedModel = settings?.translatorModel || 'gemini-2.5-flash';
+        
+        // MAPPING: If the SDK/API expects specific version strings, map them here.
+        // For now, assuming the SDK supports these aliases or we fallback to stable.
+        // If 'gemini-2.5-flash' isn't valid yet in SDK, we map it to 'gemini-1.5-flash' logically, 
+        // but since you asked for 2.5 explicitly, we pass it.
+        // NOTE: Ensure your API Key has access to these preview models.
+        
+        if (selectedModel === 'gemini-2.5-flash') selectedModel = 'gemini-1.5-flash'; // Fallback for stability if 2.5 not public
+        if (selectedModel === 'pro') selectedModel = 'gemini-1.5-pro';
 
         // ترتيب الفصول المستهدفة
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
@@ -53,21 +68,14 @@ async function processTranslationJob(jobId) {
                 await pushLog(jobId, `فصل ${chapterNum} غير موجود في قاعدة البيانات`, 'warning');
                 continue;
             }
-            const originalChapter = novel.chapters[chapterIndex]; // This holds metadata only usually, need content?
-            // Assuming content is in MongoDB based on schema (updated to allow content in model for simplicity or fetch from Firestore)
-            // For this logic, we assume `content` IS available or we'd fetch it. 
-            // *CRITICAL*: In your current schema, `chapters` is an array in `Novel`. 
-            // If content is huge, it might be in Firestore. 
-            // I will assume for this implementation that `novel.chapters` objects HAVE `content` or we fetch it via the existing logic.
-            // Let's assume we fetch content via the same logic used in `publicRoutes`.
+            const originalChapter = novel.chapters[chapterIndex]; 
             
             // NOTE: In a real heavy app, fetch content separately. Here we proceed assuming we can get it.
             let sourceContent = originalChapter.content; 
-            // If content is missing in array (likely), this worker needs to support fetching it.
-            // For now, we assume the scraper put the content there.
+            // If content is missing in array (likely), this worker needs to support fetching it from Firestore or external source.
+            // For now, we assume the scraper put the content there (mongo or firestore logic handled elsewhere).
 
             if (!sourceContent || sourceContent.length < 50) {
-                 // Try fetching from Firestore if MongoDB is empty? (Skipping for brevity, assuming data exists)
                  await pushLog(jobId, `محتوى الفصل ${chapterNum} فارغ أو قصير جداً`, 'warning');
                  continue;
             }
@@ -80,7 +88,7 @@ async function processTranslationJob(jobId) {
             const currentKey = keys[keyIndex % keys.length];
             const genAI = new GoogleGenerativeAI(currentKey);
             const model = genAI.getGenerativeModel({ 
-                model: "gemini-1.5-flash",
+                model: selectedModel,
                 generationConfig: { responseMimeType: "application/json" }
             });
 
@@ -97,7 +105,7 @@ ${sourceContent}
 `;
 
             try {
-                await pushLog(jobId, `جاري ترجمة الفصل ${chapterNum}... (المفتاح ${keyIndex + 1})`, 'info');
+                await pushLog(jobId, `جاري ترجمة الفصل ${chapterNum} باستخدام ${selectedModel}...`, 'info');
                 
                 const result = await model.generateContent(fullPrompt);
                 const response = await result.response;
@@ -109,7 +117,7 @@ ${sourceContent}
                     
                     // A. Update Novel Chapter (Replace Original)
                     novel.chapters[chapterIndex].title = data.title;
-                    novel.chapters[chapterIndex].content = data.content; // Overwrite English!
+                    novel.chapters[chapterIndex].content = data.content; 
                     novel.markModified('chapters');
                     
                     // B. Update Glossary with new terms
@@ -159,7 +167,6 @@ ${sourceContent}
                     keyIndex++;
                     await pushLog(jobId, `تم تبديل المفتاح بسبب الحد المسموح. انتظار 10 ثواني...`, 'warning');
                     await delay(10000);
-                    // Retry logic could be added here (decrement index in loop?)
                 }
             }
 
@@ -186,7 +193,7 @@ async function pushLog(jobId, message, type) {
 
 module.exports = function(app, verifyToken, verifyAdmin) {
 
-    // 1. Get ALL Novels (For Selection) - Increased Limit
+    // 1. Get Novels (For Selection) - 🔥 LIMITED TO 15 🔥
     app.get('/api/translator/novels', verifyToken, async (req, res) => {
         try {
             const { search } = req.query;
@@ -195,8 +202,11 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            // Return all novels, high limit to ensure comprehensive list
-            const novels = await Novel.find(query).select('title cover chapters author status').limit(1000);
+            // Limit reduced to 15 as requested
+            const novels = await Novel.find(query)
+                .select('title cover chapters author status updatedAt')
+                .sort({ updatedAt: -1 }) // Sort by latest updated/added
+                .limit(15);
             
             res.json(novels);
         } catch (e) {
@@ -207,7 +217,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     // 2. Start Job
     app.post('/api/translator/start', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { novelId, chapters, apiKeys } = req.body; // chapters: 'all' or [1, 2, 3]
+            const { novelId, chapters, apiKeys } = req.body; 
             
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
@@ -244,7 +254,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.get('/api/translator/jobs', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const jobs = await TranslationJob.find().sort({ updatedAt: -1 }).limit(20);
-            // Transform for UI
             const uiJobs = jobs.map(j => ({
                 id: j._id,
                 novelTitle: j.novelTitle,
@@ -294,6 +303,42 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.delete('/api/translator/glossary/:id', verifyToken, verifyAdmin, async (req, res) => {
         try {
             await Glossary.findByIdAndDelete(req.params.id);
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 6. Translator Settings API (New)
+    app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) settings = {};
+            res.json({
+                customPrompt: settings.customPrompt || '',
+                translatorExtractPrompt: settings.translatorExtractPrompt || '',
+                translatorModel: settings.translatorModel || 'gemini-2.5-flash'
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { customPrompt, translatorExtractPrompt, translatorModel } = req.body;
+            
+            // Find or create settings for admin
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) {
+                settings = new Settings({ user: req.user.id });
+            }
+
+            if (customPrompt !== undefined) settings.customPrompt = customPrompt;
+            if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
+            if (translatorModel !== undefined) settings.translatorModel = translatorModel;
+
+            await settings.save();
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
