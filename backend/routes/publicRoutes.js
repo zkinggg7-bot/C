@@ -48,6 +48,14 @@ async function checkNovelStatus(novel) {
     return novel;
 }
 
+// 🔥 Helper for Forbidden Words Filter
+const isChapterHidden = (title) => {
+    if (!title) return true;
+    const lower = title.toLowerCase();
+    const forbidden = ['chapter', 'ago', 'month', 'week', 'day', 'year'];
+    return forbidden.some(word => lower.includes(word));
+};
+
 module.exports = function(app, verifyToken, upload) {
 
     // =========================================================
@@ -482,14 +490,14 @@ module.exports = function(app, verifyToken, upload) {
             let chaptersFilter = "$chapters"; // Default: all chapters (for Admin)
 
             if (role !== 'admin') {
-                // For users, filter out chapters containing "Chapter" in title
+                // For users, filter out chapters containing keywords in title
                 chaptersFilter = {
                     $filter: {
                         input: "$chapters",
                         as: "ch",
                         cond: {
                             $eq: [
-                                { $regexMatch: { input: "$$ch.title", regex: "chapter", options: "i" } },
+                                { $regexMatch: { input: "$$ch.title", regex: "chapter|ago|month|week|day|year", options: "i" } },
                                 false
                             ]
                         }
@@ -560,12 +568,10 @@ module.exports = function(app, verifyToken, upload) {
             novelDoc = await checkNovelStatus(novelDoc);
             const novel = novelDoc.toObject();
 
-            // 🔥 Filter Chapters: Hide if title contains 'Chapter' (case-insensitive) for non-admins
+            // 🔥 Filter Chapters: Hide if title contains Forbidden Words for non-admins
             if (role !== 'admin') {
                 if (novel.chapters) {
-                    novel.chapters = novel.chapters.filter(c => 
-                        !c.title || !c.title.toLowerCase().includes('chapter')
-                    );
+                    novel.chapters = novel.chapters.filter(c => !isChapterHidden(c.title));
                 }
             }
 
@@ -596,10 +602,9 @@ module.exports = function(app, verifyToken, upload) {
 
             if (!chapterMeta) return res.status(404).json({ message: 'Chapter metadata not found' });
 
-            // 🔥 Extra Check: Prevent access if title contains 'Chapter'
+            // 🔥 Extra Check: Prevent access if title contains Forbidden Words
             if (role !== 'admin') {
-                const title = chapterMeta.title || '';
-                if (title.toLowerCase().includes('chapter')) {
+                if (isChapterHidden(chapterMeta.title)) {
                     return res.status(403).json({ message: "Chapter not available yet" });
                 }
             }
@@ -637,7 +642,7 @@ module.exports = function(app, verifyToken, upload) {
             // Fix Total Chapters count for reader based on filtered list if not admin
             let totalAvailable = novel.chapters.length;
             if (role !== 'admin') {
-                totalAvailable = novel.chapters.filter(c => !c.title || !c.title.toLowerCase().includes('chapter')).length;
+                totalAvailable = novel.chapters.filter(c => !isChapterHidden(c.title)).length;
             }
 
             res.json({ 
@@ -759,10 +764,9 @@ module.exports = function(app, verifyToken, upload) {
                 const readList = libraryEntry.readChapters || [];
                 const libCreatedAt = new Date(libraryEntry.createdAt);
                 
-                // Only count chapters that are translated (do NOT have 'Chapter' in title)
+                // Only count chapters that are translated (do NOT have Keywords in title)
                 const newUnreadChapters = (novel.chapters || []).filter(ch => {
-                    const title = ch.title || '';
-                    const isTranslated = !title.toLowerCase().includes('chapter');
+                    const isTranslated = !isChapterHidden(ch.title);
                     const chapDate = new Date(ch.createdAt);
                     const isNewer = chapDate > libCreatedAt;
                     const isUnread = !readList.includes(ch.number);
@@ -771,7 +775,7 @@ module.exports = function(app, verifyToken, upload) {
                 
                 if (newUnreadChapters.length > 0) {
                     const count = newUnreadChapters.length;
-                    const lastChapter = novel.chapters.filter(c => !c.title || !c.title.toLowerCase().includes('chapter')).pop();
+                    const lastChapter = novel.chapters.filter(c => !isChapterHidden(c.title)).pop();
                     
                     if (lastChapter) {
                         notifications.push({
