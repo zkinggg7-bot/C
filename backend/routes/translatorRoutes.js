@@ -6,14 +6,30 @@ const Glossary = require('../models/glossary.model.js');
 const TranslationJob = require('../models/translationJob.model.js');
 const Settings = require('../models/settings.model.js');
 
+// --- Firestore Setup (MANDATORY) ---
+let firestore;
+try {
+    const firebaseAdmin = require('../config/firebaseAdmin');
+    firestore = firebaseAdmin.db;
+} catch (e) {
+    console.error("❌ CRITICAL: Firestore not loaded. Translator cannot work without it.");
+}
+
 // --- Helper: Delay ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- THE TRANSLATION WORKER (2-STEP PROCESS) ---
+// --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
     try {
         const job = await TranslationJob.findById(jobId);
         if (!job || job.status !== 'active') return;
+
+        if (!firestore) {
+            job.status = 'failed';
+            job.logs.push({ message: 'خطأ خادم: قاعدة بيانات النصوص (Firestore) غير متصلة', type: 'error' });
+            await job.save();
+            return;
+        }
 
         const novel = await Novel.findById(job.novelId);
         if (!novel) {
@@ -23,8 +39,7 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        // 1. Get Settings (Fallback)
-        // Note: Keys should ideally come from job.apiKeys now, but we keep fallback just in case.
+        // 1. Get Settings & Keys
         const settings = await Settings.findOne({}); 
         
         // Merge Keys: Prioritize keys stored in the Job itself
@@ -32,7 +47,7 @@ async function processTranslationJob(jobId) {
         
         if (!keys || keys.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة. يرجى إضافة مفاتيح في الإعدادات وإعادة المحاولة.', type: 'error' });
+            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة.', type: 'error' });
             await job.save();
             return;
         }
@@ -53,25 +68,36 @@ async function processTranslationJob(jobId) {
             const freshJob = await TranslationJob.findById(jobId);
             if (freshJob.status !== 'active') break;
 
-            // Get Data
+            // Get Metadata Index
             const chapterIndex = novel.chapters.findIndex(c => c.number === chapterNum);
             if (chapterIndex === -1) {
-                await pushLog(jobId, `فصل ${chapterNum} غير موجود`, 'warning');
+                await pushLog(jobId, `فصل ${chapterNum} غير موجود في الفهرس`, 'warning');
                 continue;
             }
-            const originalChapter = novel.chapters[chapterIndex]; 
-            let sourceContent = originalChapter.content || ""; 
 
-            if (!sourceContent || sourceContent.length < 50) {
-                 await pushLog(jobId, `محتوى الفصل ${chapterNum} قصير جداً`, 'warning');
+            // 🔥 STEP 0: FETCH SOURCE CONTENT FROM FIRESTORE ONLY
+            let sourceContent = ""; 
+            try {
+                const docRef = firestore.collection('novels').doc(novel._id.toString()).collection('chapters').doc(chapterNum.toString());
+                const docSnap = await docRef.get();
+                if (docSnap.exists) {
+                    const data = docSnap.data();
+                    sourceContent = data.content || "";
+                }
+            } catch (fsErr) {
+                console.log(`Firestore fetch error for Ch ${chapterNum}:`, fsErr.message);
+            }
+
+            if (!sourceContent || sourceContent.trim().length === 0) {
+                 await pushLog(jobId, `تخطي الفصل ${chapterNum}: المحتوى غير موجود في السيرفر (Firestore)`, 'warning');
                  continue;
             }
 
-            // --- STEP 0: Prepare Glossary (Fetched FRESH every chapter) ---
+            // --- Prepare Glossary ---
             const glossaryItems = await Glossary.find({ novelId: novel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
-            // --- KEY ROTATION HELPER ---
+            // --- Key Rotation ---
             const getModel = () => {
                 const currentKey = keys[keyIndex % keys.length];
                 const genAI = new GoogleGenerativeAI(currentKey);
@@ -108,8 +134,7 @@ ${sourceContent}
                     keyIndex++; // Rotate key
                     await pushLog(jobId, `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة...`, 'warning');
                     await delay(5000);
-                    // Retry logic simple: redo iteration
-                    chaptersToProcess.unshift(chapterNum); 
+                    chaptersToProcess.unshift(chapterNum); // Retry this chapter
                     continue;
                 }
                 await pushLog(jobId, `❌ فشل الترجمة للفصل ${chapterNum}: ${err.message}`, 'error');
@@ -122,10 +147,8 @@ ${sourceContent}
             try {
                 await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
                 
-                // Use a different key if possible or rotate for distribution
                 keyIndex++; 
                 const modelJSON = getModel();
-                // Force JSON output for extraction
                 modelJSON.generationConfig = { responseMimeType: "application/json" };
 
                 const extractionInput = `
@@ -142,7 +165,7 @@ ${translatedText.substring(0, 8000)}
                 const jsonExt = JSON.parse(responseExt.text());
 
                 // ======================================================
-                // 🔥 STEP 3: SAVE GLOSSARY & UPDATE NOVEL
+                // 🔥 STEP 3: SAVE TO FIRESTORE ONLY (CONTENT) & MONGO (METADATA)
                 // ======================================================
                 
                 // A. Save Terms
@@ -164,28 +187,58 @@ ${translatedText.substring(0, 8000)}
                     if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
                 }
 
-                // B. Update Novel Content (Replace English with Arabic)
+                // B. Save Translation to FIRESTORE (The ONE AND ONLY place for text)
+                try {
+                    await firestore.collection('novels').doc(novel._id.toString())
+                        .collection('chapters').doc(chapterNum.toString())
+                        .set({
+                            title: `الفصل ${chapterNum}`, // Update title in FS
+                            content: translatedText, // Save Arabic Text
+                            lastUpdated: new Date()
+                        }, { merge: true });
+                    
+                } catch (fsSaveErr) {
+                    throw new Error(`فشل الحفظ في Firestore: ${fsSaveErr.message}`);
+                }
+
+                // C. Update MongoDB Metadata ONLY (NO CONTENT HERE)
+                // We assume the translation succeeded, so we might want to update the title to Arabic if you wish, 
+                // or just keep it as "الفصل X". We DO NOT set .content here.
                 novel.chapters[chapterIndex].title = `الفصل ${chapterNum}`; 
-                novel.chapters[chapterIndex].content = translatedText;
                 novel.markModified('chapters');
                 await novel.save();
 
-                // C. Update Job
+                // D. Update Job
                 await TranslationJob.findByIdAndUpdate(jobId, {
                     $inc: { translatedCount: 1 },
                     $set: { currentChapter: chapterNum, lastUpdate: new Date() }
                 });
 
-                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} بالكامل`, 'success');
+                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} وحفظه في السيرفر`, 'success');
 
             } catch (err) {
-                console.error("Extraction Error:", err);
-                await pushLog(jobId, `⚠️ فشل الاستخراج (تم حفظ الترجمة فقط): ${err.message}`, 'warning');
+                console.error("Extraction/Save Error:", err);
                 
-                // Save translation even if extraction failed
-                novel.chapters[chapterIndex].content = translatedText;
-                novel.markModified('chapters');
-                await novel.save();
+                // Fallback: If extraction failed but we have translation, TRY TO SAVE TRANSLATION ANYWAY
+                if (translatedText) {
+                    try {
+                        // Save to Firestore
+                        await firestore.collection('novels').doc(novel._id.toString())
+                            .collection('chapters').doc(chapterNum.toString())
+                            .set({ content: translatedText }, { merge: true });
+                        
+                        // Update Mongo Metadata
+                        novel.chapters[chapterIndex].title = `الفصل ${chapterNum}`;
+                        novel.markModified('chapters');
+                        await novel.save();
+
+                        await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
+                    } catch (saveErr) {
+                        await pushLog(jobId, `❌ فشل الحفظ النهائي: ${saveErr.message}`, 'error');
+                    }
+                } else {
+                    await pushLog(jobId, `❌ فشل العملية: ${err.message}`, 'error');
+                }
             }
 
             await delay(2000); // Cool down
