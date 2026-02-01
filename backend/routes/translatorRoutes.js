@@ -10,7 +10,6 @@ const Settings = require('../models/settings.model.js');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- THE TRANSLATION WORKER ---
-// تعمل هذه الدالة في الخلفية (Asynchronous) ولا تعطل استجابة السيرفر
 async function processTranslationJob(jobId) {
     try {
         const job = await TranslationJob.findById(jobId);
@@ -24,45 +23,32 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        // إعداد المفاتيح (Rotation)
-        let keyIndex = 0;
-        const keys = job.apiKeys;
+        // 1. Get Settings (Prompts & Global Keys)
+        const settings = await Settings.findOne({}); 
+        
+        // Merge Job Keys with Global Keys
+        let keys = job.apiKeys && job.apiKeys.length > 0 ? job.apiKeys : (settings?.translatorApiKeys || []);
+        
         if (!keys || keys.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API', type: 'error' });
+            job.logs.push({ message: 'لا توجد مفاتيح API (لا في المهمة ولا في الإعدادات العامة)', type: 'error' });
             await job.save();
             return;
         }
 
-        // جلب الإعدادات (Prompts & Model)
-        // نفترض وجود إعدادات عامة للأدمن (أو أول مستخدم أدمن)
-        // في نظام متعدد المستخدمين، يجب تمرير userId في الـ job
-        const settings = await Settings.findOne({}); 
-        
+        let keyIndex = 0;
         const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the following novel chapter to Arabic. Use the provided Glossary strictly. output JSON: { \"title\": \"Arabic Title\", \"content\": \"Arabic Content (HTML formatted paragraphs)\", \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\"}] }";
-        
-        // 🔥 Use Selected Model
-        // Map user friendly names to actual API model names if needed
-        let selectedModel = settings?.translatorModel || 'gemini-2.5-flash';
-        
-        // MAPPING: If the SDK/API expects specific version strings, map them here.
-        // For now, assuming the SDK supports these aliases or we fallback to stable.
-        // If 'gemini-2.5-flash' isn't valid yet in SDK, we map it to 'gemini-1.5-flash' logically, 
-        // but since you asked for 2.5 explicitly, we pass it.
-        // NOTE: Ensure your API Key has access to these preview models.
-        
-        if (selectedModel === 'gemini-2.5-flash') selectedModel = 'gemini-1.5-flash'; // Fallback for stability if 2.5 not public
-        if (selectedModel === 'pro') selectedModel = 'gemini-1.5-pro';
+        let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; // Default fallback
 
         // ترتيب الفصول المستهدفة
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
 
         for (const chapterNum of chaptersToProcess) {
-            // 1. Check Job Status (Stop if paused/cancelled)
+            // Check Job Status
             const freshJob = await TranslationJob.findById(jobId);
             if (freshJob.status !== 'active') break;
 
-            // 2. Get Chapter Data
+            // Get Chapter Data
             const chapterIndex = novel.chapters.findIndex(c => c.number === chapterNum);
             if (chapterIndex === -1) {
                 await pushLog(jobId, `فصل ${chapterNum} غير موجود في قاعدة البيانات`, 'warning');
@@ -70,21 +56,21 @@ async function processTranslationJob(jobId) {
             }
             const originalChapter = novel.chapters[chapterIndex]; 
             
-            // NOTE: In a real heavy app, fetch content separately. Here we proceed assuming we can get it.
-            let sourceContent = originalChapter.content; 
-            // If content is missing in array (likely), this worker needs to support fetching it from Firestore or external source.
-            // For now, we assume the scraper put the content there (mongo or firestore logic handled elsewhere).
+            // Assume content exists or fetched from external DB. 
+            // Here we assume it's in the array for simplicity of the prompt context.
+            // In production, fetch from Firestore/GridFS if 'content' is not in Mongo.
+            let sourceContent = originalChapter.content || ""; 
 
             if (!sourceContent || sourceContent.length < 50) {
                  await pushLog(jobId, `محتوى الفصل ${chapterNum} فارغ أو قصير جداً`, 'warning');
                  continue;
             }
 
-            // 3. Get Glossary
+            // Get Glossary
             const glossaryItems = await Glossary.find({ novelId: novel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
-            // 4. Prepare Gemini
+            // Rotate Key
             const currentKey = keys[keyIndex % keys.length];
             const genAI = new GoogleGenerativeAI(currentKey);
             const model = genAI.getGenerativeModel({ 
@@ -95,7 +81,7 @@ async function processTranslationJob(jobId) {
             const fullPrompt = `
 ${transPrompt}
 
---- GLOSSARY (Strictly enforce these) ---
+--- GLOSSARY (Strictly enforce these terms) ---
 ${glossaryText}
 ----------------------------------------
 
@@ -105,7 +91,7 @@ ${sourceContent}
 `;
 
             try {
-                await pushLog(jobId, `جاري ترجمة الفصل ${chapterNum} باستخدام ${selectedModel}...`, 'info');
+                await pushLog(jobId, `جاري ترجمة الفصل ${chapterNum}...`, 'info');
                 
                 const result = await model.generateContent(fullPrompt);
                 const response = await result.response;
@@ -113,19 +99,16 @@ ${sourceContent}
                 const data = JSON.parse(jsonText);
 
                 if (data.title && data.content) {
-                    // 5. Update Database
-                    
-                    // A. Update Novel Chapter (Replace Original)
+                    // Update Novel
                     novel.chapters[chapterIndex].title = data.title;
                     novel.chapters[chapterIndex].content = data.content; 
                     novel.markModified('chapters');
                     
-                    // B. Update Glossary with new terms
+                    // Update Glossary with new terms
                     if (data.newTerms && Array.isArray(data.newTerms)) {
                         let newTermsCount = 0;
                         for (const termObj of data.newTerms) {
                             if (termObj.term && termObj.translation) {
-                                // Check if exists locally to avoid DB hits
                                 const exists = glossaryItems.some(g => g.term.toLowerCase() === termObj.term.toLowerCase());
                                 if (!exists) {
                                     await Glossary.create({
@@ -143,7 +126,6 @@ ${sourceContent}
                         }
                     }
 
-                    // Save Novel
                     await novel.save();
                     
                     // Update Job Progress
@@ -162,19 +144,16 @@ ${sourceContent}
                 console.error(err);
                 await pushLog(jobId, `❌ خطأ في الفصل ${chapterNum}: ${err.message}`, 'error');
                 
-                // If Rate Limit (429), switch key and wait
                 if (err.message.includes('429') || err.message.includes('quota')) {
                     keyIndex++;
-                    await pushLog(jobId, `تم تبديل المفتاح بسبب الحد المسموح. انتظار 10 ثواني...`, 'warning');
+                    await pushLog(jobId, `تم تبديل المفتاح وتأخير 10 ثواني...`, 'warning');
                     await delay(10000);
                 }
             }
 
-            // Anti-Rate Limit Delay between chapters
             await delay(2000);
         }
 
-        // Finish
         await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
         await pushLog(jobId, `🎉 اكتملت المهمة!`, 'success');
 
@@ -193,7 +172,7 @@ async function pushLog(jobId, message, type) {
 
 module.exports = function(app, verifyToken, verifyAdmin) {
 
-    // 1. Get Novels (For Selection) - 🔥 LIMITED TO 15 🔥
+    // 1. Get Novels (Latest 15 ADDED)
     app.get('/api/translator/novels', verifyToken, async (req, res) => {
         try {
             const { search } = req.query;
@@ -202,10 +181,10 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            // Limit reduced to 15 as requested
+            // Sort by createdAt -1 (Newest created first)
             const novels = await Novel.find(query)
-                .select('title cover chapters author status updatedAt')
-                .sort({ updatedAt: -1 }) // Sort by latest updated/added
+                .select('title cover chapters author status createdAt')
+                .sort({ createdAt: -1 }) 
                 .limit(15);
             
             res.json(novels);
@@ -214,20 +193,29 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 2. Start Job
+    // 2. Start Job (Supports Resume & Ranges)
     app.post('/api/translator/start', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { novelId, chapters, apiKeys } = req.body; 
+            const { novelId, chapters, apiKeys, resumeFrom } = req.body; 
             
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
             let targetChapters = [];
-            if (chapters === 'all') {
+            
+            if (resumeFrom) {
+                // Resume logic: translate all chapters AFTER resumeFrom
+                targetChapters = novel.chapters
+                    .filter(c => c.number >= resumeFrom)
+                    .map(c => c.number);
+            } else if (chapters === 'all') {
                 targetChapters = novel.chapters.map(c => c.number);
             } else if (Array.isArray(chapters)) {
                 targetChapters = chapters;
             }
+
+            // Ensure we have keys (either passed or from settings)
+            // Logic handled inside worker, but we can verify here too if needed.
 
             const job = new TranslationJob({
                 novelId,
@@ -235,13 +223,13 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 cover: novel.cover,
                 targetChapters,
                 totalToTranslate: targetChapters.length,
-                apiKeys: apiKeys.filter(k => k.trim().length > 0),
-                logs: [{ message: 'تم بدء المهمة', type: 'info' }]
+                apiKeys: apiKeys || [], 
+                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل)`, type: 'info' }]
             });
 
             await job.save();
 
-            // Start Worker (Fire & Forget)
+            // Fire Worker
             processTranslationJob(job._id);
 
             res.json({ message: "Job started", jobId: job._id });
@@ -269,17 +257,26 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 4. Get Job Details
+    // 4. Get Job Details (Enhanced for Analytics)
     app.get('/api/translator/jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const job = await TranslationJob.findById(req.params.id);
-            res.json(job);
+            if (!job) return res.status(404).json({message: "Job not found"});
+
+            // Fetch novel to check current max chapter
+            const novel = await Novel.findById(job.novelId).select('chapters');
+            const maxChapter = novel ? (novel.chapters.length > 0 ? Math.max(...novel.chapters.map(c => c.number)) : 0) : 0;
+
+            const response = job.toObject();
+            response.novelMaxChapter = maxChapter; // For resume logic
+            
+            res.json(response);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
 
-    // 5. Manage Glossary
+    // 5. Manage Glossary (With Bulk & Search)
     app.get('/api/translator/glossary/:novelId', verifyToken, async (req, res) => {
         try {
             const terms = await Glossary.find({ novelId: req.params.novelId });
@@ -292,8 +289,12 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.post('/api/translator/glossary', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { novelId, term, translation } = req.body;
-            const newTerm = new Glossary({ novelId, term, translation, autoGenerated: false });
-            await newTerm.save();
+            // Upsert logic
+            const newTerm = await Glossary.findOneAndUpdate(
+                { novelId, term },
+                { translation, autoGenerated: false },
+                { new: true, upsert: true }
+            );
             res.json(newTerm);
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -308,8 +309,19 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             res.status(500).json({ error: e.message });
         }
     });
+    
+    // Bulk Delete Glossary
+    app.post('/api/translator/glossary/bulk-delete', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const { ids } = req.body;
+            await Glossary.deleteMany({ _id: { $in: ids } });
+            res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
 
-    // 🔥 6. Translator Settings API (New)
+    // 6. Translator Settings API (Including Keys)
     app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
             let settings = await Settings.findOne({ user: req.user.id });
@@ -317,7 +329,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             res.json({
                 customPrompt: settings.customPrompt || '',
                 translatorExtractPrompt: settings.translatorExtractPrompt || '',
-                translatorModel: settings.translatorModel || 'gemini-2.5-flash'
+                translatorModel: settings.translatorModel || 'gemini-2.5-flash',
+                translatorApiKeys: settings.translatorApiKeys || []
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -326,9 +339,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
 
     app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { customPrompt, translatorExtractPrompt, translatorModel } = req.body;
+            const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys } = req.body;
             
-            // Find or create settings for admin
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) {
                 settings = new Settings({ user: req.user.id });
@@ -337,6 +349,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             if (customPrompt !== undefined) settings.customPrompt = customPrompt;
             if (translatorExtractPrompt !== undefined) settings.translatorExtractPrompt = translatorExtractPrompt;
             if (translatorModel !== undefined) settings.translatorModel = translatorModel;
+            if (translatorApiKeys !== undefined) settings.translatorApiKeys = translatorApiKeys;
 
             await settings.save();
             res.json({ success: true });
