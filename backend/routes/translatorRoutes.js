@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Novel = require('../models/novel.model.js');
@@ -261,6 +260,21 @@ async function pushLog(jobId, message, type) {
 
 
 module.exports = function(app, verifyToken, verifyAdmin) {
+
+    // 🔥 FIX: Auto-clean old conflicting indexes on startup
+    mongoose.connection.once('open', async () => {
+        try {
+            const collection = mongoose.connection.db.collection('glossaries');
+            // List all indexes to check if the problematic one exists
+            const indexes = await collection.indexes();
+            if (indexes.some(idx => idx.name === 'user_1_key_1')) {
+                await collection.dropIndex('user_1_key_1');
+                console.log('✅ Deleted old conflicting index: user_1_key_1');
+            }
+        } catch (err) {
+            console.log('ℹ️ No old indexes to delete or already cleaned.');
+        }
+    });
 
     // 1. Get Novels (Latest 15 ADDED)
     app.get('/api/translator/novels', verifyToken, async (req, res) => {
