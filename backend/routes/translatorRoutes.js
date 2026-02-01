@@ -23,15 +23,16 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        // 1. Get Settings
+        // 1. Get Settings (Fallback)
+        // Note: Keys should ideally come from job.apiKeys now, but we keep fallback just in case.
         const settings = await Settings.findOne({}); 
         
-        // Merge Keys
-        let keys = job.apiKeys && job.apiKeys.length > 0 ? job.apiKeys : (settings?.translatorApiKeys || []);
+        // Merge Keys: Prioritize keys stored in the Job itself
+        let keys = (job.apiKeys && job.apiKeys.length > 0) ? job.apiKeys : (settings?.translatorApiKeys || []);
         
         if (!keys || keys.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API', type: 'error' });
+            job.logs.push({ message: 'لا توجد مفاتيح API محفوظة. يرجى إضافة مفاتيح في الإعدادات وإعادة المحاولة.', type: 'error' });
             await job.save();
             return;
         }
@@ -136,9 +137,6 @@ ${sourceContent.substring(0, 8000)}
 ${translatedText.substring(0, 8000)}
 --------------------------
 `; 
-                // Note: We trim input for extraction to avoid context limit if novel is huge, 
-                // usually terms appear early or throughout. Adjust length as needed.
-
                 const resultExt = await modelJSON.generateContent(extractionInput);
                 const responseExt = await resultExt.response;
                 const jsonExt = JSON.parse(responseExt.text());
@@ -152,7 +150,6 @@ ${translatedText.substring(0, 8000)}
                     let newTermsCount = 0;
                     for (const termObj of jsonExt.newTerms) {
                         if (termObj.term && termObj.translation) {
-                            // Atomic Upsert to ensure it's ready for NEXT chapter immediately
                             await Glossary.updateOne(
                                 { novelId: novel._id, term: termObj.term }, 
                                 { 
@@ -168,7 +165,7 @@ ${translatedText.substring(0, 8000)}
                 }
 
                 // B. Update Novel Content (Replace English with Arabic)
-                novel.chapters[chapterIndex].title = `الفصل ${chapterNum}`; // Or extract title from text if needed
+                novel.chapters[chapterIndex].title = `الفصل ${chapterNum}`; 
                 novel.chapters[chapterIndex].content = translatedText;
                 novel.markModified('chapters');
                 await novel.save();
@@ -240,6 +237,17 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
+            // 🔥 CRITICAL FIX: Fetch keys from User Settings explicitly
+            const userSettings = await Settings.findOne({ user: req.user.id });
+            const savedKeys = userSettings?.translatorApiKeys || [];
+            
+            // Determine effective keys: passed in body > saved in settings > error
+            const effectiveKeys = (apiKeys && apiKeys.length > 0) ? apiKeys : savedKeys;
+
+            if (effectiveKeys.length === 0) {
+                return res.status(400).json({ message: "No API keys found. Please add keys in Settings first." });
+            }
+
             let targetChapters = [];
             
             if (resumeFrom) {
@@ -258,8 +266,8 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 cover: novel.cover,
                 targetChapters,
                 totalToTranslate: targetChapters.length,
-                apiKeys: apiKeys || [], 
-                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل)`, type: 'info' }]
+                apiKeys: effectiveKeys, // 🔥 Save keys to job
+                logs: [{ message: `تم بدء المهمة (استهداف ${targetChapters.length} فصل) باستخدام ${effectiveKeys.length} مفتاح`, type: 'info' }]
             });
 
             await job.save();
