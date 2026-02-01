@@ -186,7 +186,7 @@ async function pushLog(jobId, message, type) {
 
 module.exports = function(app, verifyToken, verifyAdmin) {
 
-    // 1. Get English Novels (For Selection)
+    // 1. Get ALL Novels (For Selection) - Increased Limit
     app.get('/api/translator/novels', verifyToken, async (req, res) => {
         try {
             const { search } = req.query;
@@ -195,13 +195,9 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            // Fetch novels. Optimally, we filter for English ones.
-            // Heuristic: Check if title contains mostly English characters?
-            // For now, return all, user filters in UI or search.
-            const novels = await Novel.find(query).select('title cover chapters author status').limit(50);
+            // Return all novels, high limit to ensure comprehensive list
+            const novels = await Novel.find(query).select('title cover chapters author status').limit(1000);
             
-            // Simple filter: return novels where title has ascii chars (English)
-            // Or just return all and let admin decide.
             res.json(novels);
         } catch (e) {
             res.status(500).json({ error: e.message });
