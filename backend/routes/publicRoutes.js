@@ -1,5 +1,6 @@
 
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken'); // 🔥 Required for token decoding
 
 // --- Config Imports ---
 let firestore, cloudinary;
@@ -16,21 +17,30 @@ const User = require('../models/user.model.js');
 const Novel = require('../models/novel.model.js');
 const NovelLibrary = require('../models/novelLibrary.model.js'); 
 const Comment = require('../models/comment.model.js');
-const Settings = require('../models/settings.model.js'); // 🔥 Added Settings Import
+const Settings = require('../models/settings.model.js'); 
 
 // Helper to escape regex special characters
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Helper to get user role inside public route (Safely)
+const getUserRole = (req) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) return 'guest';
+        const decoded = jwt.decode(token); 
+        return decoded?.role || 'guest';
+    } catch (e) { return 'guest'; }
+};
+
 // Helper to check and update status automatically
 async function checkNovelStatus(novel) {
-    if (novel.status === 'مكتملة') return novel; // المكتملة لا تتغير
+    if (novel.status === 'مكتملة') return novel; 
 
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    // إذا مر 30 يوم والحالة مستمرة، حولها لمتوقفة
     if (novel.lastChapterUpdate < thirtyDaysAgo && novel.status === 'مستمرة') {
         novel.status = 'متوقفة';
         await novel.save();
@@ -47,13 +57,12 @@ module.exports = function(app, verifyToken, upload) {
         try {
             if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
-            // التحويل إلى Base64 مع معالجة أفضل للذاكرة
             const b64 = Buffer.from(req.file.buffer).toString('base64');
             let dataURI = "data:" + req.file.mimetype + ";base64," + b64;
             
             const result = await cloudinary.uploader.upload(dataURI, {
                 folder: "zeus_user_uploads",
-                resource_type: "auto" // السماح بجميع أنواع الصور
+                resource_type: "auto" 
             });
 
             res.json({ url: result.secure_url });
@@ -68,7 +77,7 @@ module.exports = function(app, verifyToken, upload) {
     // =========================================================
     app.post('/api/novels/:novelId/react', verifyToken, async (req, res) => {
         try {
-            const { type } = req.body; // 'like', 'love', 'funny', 'sad', 'angry'
+            const { type } = req.body; 
             const validTypes = ['like', 'love', 'funny', 'sad', 'angry'];
             
             if (!validTypes.includes(type)) return res.status(400).json({message: "Invalid reaction type"});
@@ -115,16 +124,14 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // =========================================================
-    // 💬 COMMENTS API (Updated for Chapters)
+    // 💬 COMMENTS API 
     // =========================================================
 
-    // Get Comments & Stats
     app.get('/api/novels/:novelId/comments', async (req, res) => {
         try {
             const { novelId } = req.params;
             const { sort = 'newest', page = 1, limit = 20, chapterNumber } = req.query;
             
-            // 1. Get Novel Stats (Reactions) - Only relevant for novel page, but kept for compatibility
             const novel = await Novel.findById(novelId).select('reactions');
             let stats = { like: 0, love: 0, funny: 0, sad: 0, angry: 0, total: 0, userReaction: null };
             
@@ -137,15 +144,12 @@ module.exports = function(app, verifyToken, upload) {
                 stats.total = stats.like + stats.love + stats.funny + stats.sad + stats.angry;
             }
 
-            // 2. Build Query
             let query = { novelId, parentId: null };
             
-            // 🔥 Strict filtering: If chapterNumber is provided, get ONLY that chapter's comments.
-            // If NOT provided, get ONLY general novel comments (chapterNumber: null).
             if (chapterNumber) {
                 query.chapterNumber = parseInt(chapterNumber);
             } else {
-                query.chapterNumber = null; // or { $exists: false } if migrating old data
+                query.chapterNumber = null; 
             }
 
             let sortOption = { createdAt: -1 };
@@ -159,7 +163,6 @@ module.exports = function(app, verifyToken, upload) {
                 .skip((page - 1) * limit)
                 .limit(parseInt(limit));
 
-            // 🔥 Fix for Deleted Users: Filter out comments where user is null (prevents frontend crash)
             const validComments = comments.filter(c => c.user !== null);
 
             const totalComments = await Comment.countDocuments(query);
@@ -174,21 +177,18 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // Get Replies
     app.get('/api/comments/:commentId/replies', async (req, res) => {
         try {
             const replies = await Comment.find({ parentId: req.params.commentId })
                 .populate('user', 'name picture role')
                 .sort({ createdAt: 1 });
             
-            // Filter null users here too
             res.json(replies.filter(r => r.user !== null));
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
     });
 
-    // Post Comment (Supports Chapter)
     app.post('/api/comments', verifyToken, async (req, res) => {
         try {
             const { novelId, content, parentId, chapterNumber } = req.body;
@@ -205,7 +205,7 @@ module.exports = function(app, verifyToken, upload) {
                 user: req.user.id,
                 content: content.trim(),
                 parentId: parentId || null,
-                chapterNumber: chapterNumber ? parseInt(chapterNumber) : null // 🔥 Save chapter number
+                chapterNumber: chapterNumber ? parseInt(chapterNumber) : null 
             });
 
             await newComment.save();
@@ -217,7 +217,6 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // 🔥 Update Comment (Edit)
     app.put('/api/comments/:commentId', verifyToken, async (req, res) => {
         try {
             const { content } = req.body;
@@ -225,7 +224,6 @@ module.exports = function(app, verifyToken, upload) {
             
             if (!comment) return res.status(404).json({message: "Comment not found"});
             
-            // Ensure ownership
             if (comment.user.toString() !== req.user.id) {
                 return res.status(403).json({message: "Unauthorized"});
             }
@@ -241,7 +239,6 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // Like/Dislike
     app.post('/api/comments/:commentId/action', verifyToken, async (req, res) => {
         try {
             const { action } = req.body; 
@@ -273,7 +270,6 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // Delete
     app.delete('/api/comments/:commentId', verifyToken, async (req, res) => {
         try {
             const comment = await Comment.findById(req.params.commentId);
@@ -296,7 +292,6 @@ module.exports = function(app, verifyToken, upload) {
     // 👤 USER PROFILE API
     // =========================================================
 
-    // Update Profile Info
     app.put('/api/user/profile', verifyToken, async (req, res) => {
         try {
             const { name, bio, banner, picture, isHistoryPublic } = req.body;
@@ -328,7 +323,6 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // Get User Profile with Stats
     app.get('/api/user/stats', verifyToken, async (req, res) => {
         try {
             let targetUserId = req.user.id;
@@ -357,7 +351,6 @@ module.exports = function(app, verifyToken, upload) {
             let totalViews = 0;
             let myWorks = [];
 
-            // Project only necessary fields for works list to avoid large payload
             myWorks = await Novel.find({ 
                 $or: [
                     { authorEmail: targetUser.email },
@@ -370,7 +363,6 @@ module.exports = function(app, verifyToken, upload) {
                 totalViews += (novel.views || 0);
             });
 
-            // Map works to lightweight objects
             const lightWorks = myWorks.map(novel => ({
                 _id: novel._id,
                 title: novel.title,
@@ -438,6 +430,7 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
+    // 🔥 MODIFIED: List Novels with Privacy Check
     app.get('/api/novels', async (req, res) => {
         try {
             const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
@@ -445,6 +438,13 @@ module.exports = function(app, verifyToken, upload) {
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;
             let matchStage = {};
+
+            // 🔥 Check User Role for Visibility
+            const role = getUserRole(req);
+            if (role !== 'admin') {
+                // Non-admins cannot see 'خاصة' novels
+                matchStage.status = { $ne: 'خاصة' };
+            }
 
             if (search) {
                  matchStage.$or = [
@@ -478,10 +478,6 @@ module.exports = function(app, verifyToken, upload) {
                  sortStage = { chaptersCount: -1 };
             }
 
-            // 🔥 OPTIMIZATION: Do not load the entire chapters array!
-            // We use $project to exclude 'chapters' and only calculate its size
-            // This massively reduces the payload size (from MBs to KBs)
-            
             const pipeline = [
                 { $match: matchStage },
                 { 
@@ -499,10 +495,7 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
-                        // Calculate count without returning the array
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                        // For 'latest updates', we might need the last chapter's meta data
-                        // Get ONLY the last element of the array
                         chapters: { $slice: ["$chapters", -1] } 
                     }
                 },
@@ -529,6 +522,7 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
+    // 🔥 MODIFIED: Novel Details with Chapter Filter
     app.get('/api/novels/:id', async (req, res) => {
         try {
             if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'Invalid ID' });
@@ -536,16 +530,25 @@ module.exports = function(app, verifyToken, upload) {
             let novelDoc = await Novel.findById(req.params.id);
             if (!novelDoc) return res.status(404).json({ message: 'Novel not found' });
             
+            // Check Visibility
+            const role = getUserRole(req);
+            if (novelDoc.status === 'خاصة' && role !== 'admin') {
+                return res.status(403).json({ message: "Access Denied" });
+            }
+
             novelDoc = await checkNovelStatus(novelDoc);
-            
             const novel = novelDoc.toObject();
+
+            // 🔥 Filter Chapters: Hide if title contains 'Chapter' (case-insensitive) for non-admins
+            if (role !== 'admin') {
+                if (novel.chapters) {
+                    novel.chapters = novel.chapters.filter(c => 
+                        !c.title || !c.title.toLowerCase().includes('chapter')
+                    );
+                }
+            }
+
             novel.chaptersCount = novel.chapters ? novel.chapters.length : 0;
-            
-            // Note: For Detail screen, we usually need the full chapter list (titles/numbers),
-            // but not the CONTENT of the chapters. The Model schema defines chapters as
-            // { number, title, createdAt, views }. Content is stored in Firestore or inside ZIPs usually.
-            // If `chapterSchema` in Mongoose has `content`, we MUST exclude it here too.
-            // Assuming `chapterSchema` only has metadata based on `novel.model.js`.
             
             res.json(novel);
         } catch (error) {
@@ -561,14 +564,27 @@ module.exports = function(app, verifyToken, upload) {
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: 'Novel not found' });
 
+            // 🔥 Check Access for Chapter Content too
+            const role = getUserRole(req);
+            if (novel.status === 'خاصة' && role !== 'admin') {
+                return res.status(403).json({ message: "Access Denied" });
+            }
+
             let chapterMeta = novel.chapters.find(c => c._id.toString() === chapterId) || 
                               novel.chapters.find(c => c.number == chapterId);
 
             if (!chapterMeta) return res.status(404).json({ message: 'Chapter metadata not found' });
 
+            // 🔥 Extra Check: Prevent access if title contains 'Chapter'
+            if (role !== 'admin') {
+                const title = chapterMeta.title || '';
+                if (title.toLowerCase().includes('chapter')) {
+                    return res.status(403).json({ message: "Chapter not available yet" });
+                }
+            }
+
             let content = "لا يوجد محتوى.";
             
-            // Fetch Content from Firestore
             if (firestore) {
                 const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(chapterMeta.number.toString());
                 const docSnap = await docRef.get();
@@ -577,51 +593,36 @@ module.exports = function(app, verifyToken, upload) {
                 }
             }
 
-            // =========================================================
-            // 🧹 GLOBAL CLEANER (Dynamic Runtime Check)
-            // =========================================================
             try {
-                // Find ANY settings document that has a blocklist. 
-                // In production, you might want to fetch by specific Admin ID, 
-                // but fetching non-empty lists works for this purpose.
                 const adminSettings = await Settings.findOne({ globalBlocklist: { $exists: true, $not: { $size: 0 } } });
                 
                 if (adminSettings && adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
                     const blocklist = adminSettings.globalBlocklist;
-                    
                     blocklist.forEach(word => {
                         if (!word) return;
-                        
                         if (word.includes('\n') || word.includes('\r')) {
-                            // BLOCK REMOVAL MODE (Exact match of multi-line block)
-                            // We escape regex chars just in case, but standard replace might be safer for blocks
-                            // Use split/join for global replacement of exact block
                             content = content.split(word).join('');
                         } else {
-                            // LINE/PARAGRAPH REMOVAL MODE (Keyword in line)
-                            // Regex: Start of line -> anything -> keyword -> anything -> End of line
-                            // Flags: g (global), m (multiline - makes ^ and $ match start/end of lines)
                             const escapedKeyword = escapeRegExp(word);
                             const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
                             content = content.replace(regex, '');
                         }
                     });
-
-                    // Cleanup: Remove excess empty lines created by deletion
-                    // Replace 3+ newlines with 2, or just cleanup generic empty lines
-                    content = content.replace(/^\s*[\r\n]/gm, ''); // Remove purely empty lines
-                    content = content.replace(/\n\s*\n/g, '\n\n'); // Max 1 empty line between paragraphs
+                    content = content.replace(/^\s*[\r\n]/gm, ''); 
+                    content = content.replace(/\n\s*\n/g, '\n\n'); 
                 }
-            } catch (cleanerErr) {
-                console.error("Global cleaner runtime error:", cleanerErr);
-                // Continue serving content even if cleaner fails, or maybe log it
+            } catch (cleanerErr) {}
+
+            // Fix Total Chapters count for reader based on filtered list if not admin
+            let totalAvailable = novel.chapters.length;
+            if (role !== 'admin') {
+                totalAvailable = novel.chapters.filter(c => !c.title || !c.title.toLowerCase().includes('chapter')).length;
             }
-            // =========================================================
 
             res.json({ 
                 ...chapterMeta.toObject(), 
                 content: content,
-                totalChapters: novel.chapters.length
+                totalChapters: totalAvailable
             });
         } catch (error) {
             res.status(500).json({ message: error.message });
@@ -722,7 +723,7 @@ module.exports = function(app, verifyToken, upload) {
 
             const favIds = favorites.map(f => f.novelId);
             const novels = await Novel.find({ _id: { $in: favIds } })
-                .select('title cover chapters lastChapterUpdate')
+                .select('title cover chapters lastChapterUpdate status') // Added status
                 .sort({ lastChapterUpdate: -1 })
                 .lean();
 
@@ -730,31 +731,39 @@ module.exports = function(app, verifyToken, upload) {
             let totalUnread = 0;
 
             novels.forEach(novel => {
+                // Skip hidden novels from notifications
+                if (novel.status === 'خاصة') return;
+
                 const libraryEntry = favorites.find(f => f.novelId.toString() === novel._id.toString());
                 const readList = libraryEntry.readChapters || [];
                 const libCreatedAt = new Date(libraryEntry.createdAt);
                 
+                // Only count chapters that are translated (do NOT have 'Chapter' in title)
                 const newUnreadChapters = (novel.chapters || []).filter(ch => {
+                    const title = ch.title || '';
+                    const isTranslated = !title.toLowerCase().includes('chapter');
                     const chapDate = new Date(ch.createdAt);
                     const isNewer = chapDate > libCreatedAt;
                     const isUnread = !readList.includes(ch.number);
-                    return isNewer && isUnread;
+                    return isNewer && isUnread && isTranslated;
                 });
                 
                 if (newUnreadChapters.length > 0) {
                     const count = newUnreadChapters.length;
-                    const lastChapter = novel.chapters[novel.chapters.length - 1];
+                    const lastChapter = novel.chapters.filter(c => !c.title || !c.title.toLowerCase().includes('chapter')).pop();
                     
-                    notifications.push({
-                        _id: novel._id,
-                        title: novel.title,
-                        cover: novel.cover,
-                        newChaptersCount: count,
-                        lastChapterNumber: lastChapter ? lastChapter.number : 0,
-                        lastChapterTitle: lastChapter ? lastChapter.title : '',
-                        updatedAt: novel.lastChapterUpdate
-                    });
-                    totalUnread += count;
+                    if (lastChapter) {
+                        notifications.push({
+                            _id: novel._id,
+                            title: novel.title,
+                            cover: novel.cover,
+                            newChaptersCount: count,
+                            lastChapterNumber: lastChapter.number,
+                            lastChapterTitle: lastChapter.title,
+                            updatedAt: novel.lastChapterUpdate
+                        });
+                        totalUnread += count;
+                    }
                 }
             });
 
