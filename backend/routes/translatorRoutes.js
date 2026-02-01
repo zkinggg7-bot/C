@@ -9,7 +9,7 @@ const Settings = require('../models/settings.model.js');
 // --- Helper: Delay ---
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- THE TRANSLATION WORKER ---
+// --- THE TRANSLATION WORKER (2-STEP PROCESS) ---
 async function processTranslationJob(jobId) {
     try {
         const job = await TranslationJob.findById(jobId);
@@ -23,142 +23,182 @@ async function processTranslationJob(jobId) {
             return;
         }
 
-        // 1. Get Settings (Prompts & Global Keys)
+        // 1. Get Settings
         const settings = await Settings.findOne({}); 
         
-        // Merge Job Keys with Global Keys
+        // Merge Keys
         let keys = job.apiKeys && job.apiKeys.length > 0 ? job.apiKeys : (settings?.translatorApiKeys || []);
         
         if (!keys || keys.length === 0) {
             job.status = 'failed';
-            job.logs.push({ message: 'لا توجد مفاتيح API (لا في المهمة ولا في الإعدادات العامة)', type: 'error' });
+            job.logs.push({ message: 'لا توجد مفاتيح API', type: 'error' });
             await job.save();
             return;
         }
 
         let keyIndex = 0;
-        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the following novel chapter to Arabic. Use the provided Glossary strictly. output JSON: { \"title\": \"Arabic Title\", \"content\": \"Arabic Content (HTML formatted paragraphs)\", \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\"}] }";
-        let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; // Default fallback
+        
+        // Load Prompts
+        const transPrompt = settings?.customPrompt || "You are a professional translator. Translate the novel chapter from English to Arabic. Output ONLY the Arabic translation. Use the glossary provided.";
+        const extractPrompt = settings?.translatorExtractPrompt || "Analyze the English source and Arabic translation. Extract important proper nouns, cultivation terms, and skills. Output JSON: { \"newTerms\": [{\"term\": \"English\", \"translation\": \"Arabic\"}] }";
+        
+        let selectedModel = settings?.translatorModel || 'gemini-1.5-flash'; 
 
-        // ترتيب الفصول المستهدفة
+        // Sort Chapters
         const chaptersToProcess = job.targetChapters.sort((a, b) => a - b);
 
         for (const chapterNum of chaptersToProcess) {
-            // Check Job Status
+            // Re-Check Status
             const freshJob = await TranslationJob.findById(jobId);
             if (freshJob.status !== 'active') break;
 
-            // Get Chapter Data
+            // Get Data
             const chapterIndex = novel.chapters.findIndex(c => c.number === chapterNum);
             if (chapterIndex === -1) {
-                await pushLog(jobId, `فصل ${chapterNum} غير موجود في قاعدة البيانات`, 'warning');
+                await pushLog(jobId, `فصل ${chapterNum} غير موجود`, 'warning');
                 continue;
             }
             const originalChapter = novel.chapters[chapterIndex]; 
-            
-            // Assume content exists or fetched from external DB. 
-            // Here we assume it's in the array for simplicity of the prompt context.
-            // In production, fetch from Firestore/GridFS if 'content' is not in Mongo.
             let sourceContent = originalChapter.content || ""; 
 
             if (!sourceContent || sourceContent.length < 50) {
-                 await pushLog(jobId, `محتوى الفصل ${chapterNum} فارغ أو قصير جداً`, 'warning');
+                 await pushLog(jobId, `محتوى الفصل ${chapterNum} قصير جداً`, 'warning');
                  continue;
             }
 
-            // Get Glossary
+            // --- STEP 0: Prepare Glossary (Fetched FRESH every chapter) ---
             const glossaryItems = await Glossary.find({ novelId: novel._id });
             const glossaryText = glossaryItems.map(g => `"${g.term}": "${g.translation}"`).join(',\n');
 
-            // Rotate Key
-            const currentKey = keys[keyIndex % keys.length];
-            const genAI = new GoogleGenerativeAI(currentKey);
-            const model = genAI.getGenerativeModel({ 
-                model: selectedModel,
-                generationConfig: { responseMimeType: "application/json" }
-            });
+            // --- KEY ROTATION HELPER ---
+            const getModel = () => {
+                const currentKey = keys[keyIndex % keys.length];
+                const genAI = new GoogleGenerativeAI(currentKey);
+                return genAI.getGenerativeModel({ model: selectedModel });
+            };
 
-            const fullPrompt = `
+            let translatedText = "";
+
+            // ======================================================
+            // 🔥 STEP 1: TRANSLATION (English -> Arabic)
+            // ======================================================
+            try {
+                await pushLog(jobId, `1️⃣ جاري ترجمة الفصل ${chapterNum}...`, 'info');
+                
+                const model = getModel();
+                const translationInput = `
 ${transPrompt}
 
---- GLOSSARY (Strictly enforce these terms) ---
+--- GLOSSARY (Use these strictly) ---
 ${glossaryText}
-----------------------------------------
+-------------------------------------
 
---- SOURCE CHAPTER (Title: ${originalChapter.title}) ---
+--- ENGLISH TEXT TO TRANSLATE ---
 ${sourceContent}
-----------------------------------------
+---------------------------------
 `;
-
-            try {
-                await pushLog(jobId, `جاري ترجمة الفصل ${chapterNum}...`, 'info');
-                
-                const result = await model.generateContent(fullPrompt);
+                const result = await model.generateContent(translationInput);
                 const response = await result.response;
-                const jsonText = response.text();
-                const data = JSON.parse(jsonText);
-
-                if (data.title && data.content) {
-                    // Update Novel
-                    novel.chapters[chapterIndex].title = data.title;
-                    novel.chapters[chapterIndex].content = data.content; 
-                    novel.markModified('chapters');
-                    
-                    // Update Glossary with new terms
-                    if (data.newTerms && Array.isArray(data.newTerms)) {
-                        let newTermsCount = 0;
-                        for (const termObj of data.newTerms) {
-                            if (termObj.term && termObj.translation) {
-                                const exists = glossaryItems.some(g => g.term.toLowerCase() === termObj.term.toLowerCase());
-                                if (!exists) {
-                                    await Glossary.create({
-                                        novelId: novel._id,
-                                        term: termObj.term,
-                                        translation: termObj.translation,
-                                        autoGenerated: true
-                                    });
-                                    newTermsCount++;
-                                }
-                            }
-                        }
-                        if (newTermsCount > 0) {
-                            await pushLog(jobId, `تم استخراج ${newTermsCount} مصطلح جديد`, 'success');
-                        }
-                    }
-
-                    await novel.save();
-                    
-                    // Update Job Progress
-                    await TranslationJob.findByIdAndUpdate(jobId, {
-                        $inc: { translatedCount: 1 },
-                        $set: { currentChapter: chapterNum, lastUpdate: new Date() }
-                    });
-
-                    await pushLog(jobId, `✅ تم ترجمة الفصل ${chapterNum} بنجاح`, 'success');
-
-                } else {
-                    throw new Error("Invalid JSON structure from AI");
-                }
+                translatedText = response.text();
 
             } catch (err) {
                 console.error(err);
-                await pushLog(jobId, `❌ خطأ في الفصل ${chapterNum}: ${err.message}`, 'error');
-                
                 if (err.message.includes('429') || err.message.includes('quota')) {
-                    keyIndex++;
-                    await pushLog(jobId, `تم تبديل المفتاح وتأخير 10 ثواني...`, 'warning');
-                    await delay(10000);
+                    keyIndex++; // Rotate key
+                    await pushLog(jobId, `⚠️ ضغط على المفتاح، تبديل وإعادة المحاولة...`, 'warning');
+                    await delay(5000);
+                    // Retry logic simple: redo iteration
+                    chaptersToProcess.unshift(chapterNum); 
+                    continue;
                 }
+                await pushLog(jobId, `❌ فشل الترجمة للفصل ${chapterNum}: ${err.message}`, 'error');
+                continue; 
             }
 
-            await delay(2000);
+            // ======================================================
+            // 🔥 STEP 2: EXTRACTION (English + Arabic -> Terms)
+            // ======================================================
+            try {
+                await pushLog(jobId, `2️⃣ جاري استخراج المصطلحات...`, 'info');
+                
+                // Use a different key if possible or rotate for distribution
+                keyIndex++; 
+                const modelJSON = getModel();
+                // Force JSON output for extraction
+                modelJSON.generationConfig = { responseMimeType: "application/json" };
+
+                const extractionInput = `
+${extractPrompt}
+
+--- ENGLISH SOURCE ---
+${sourceContent.substring(0, 8000)} 
+--- ARABIC TRANSLATION ---
+${translatedText.substring(0, 8000)}
+--------------------------
+`; 
+                // Note: We trim input for extraction to avoid context limit if novel is huge, 
+                // usually terms appear early or throughout. Adjust length as needed.
+
+                const resultExt = await modelJSON.generateContent(extractionInput);
+                const responseExt = await resultExt.response;
+                const jsonExt = JSON.parse(responseExt.text());
+
+                // ======================================================
+                // 🔥 STEP 3: SAVE GLOSSARY & UPDATE NOVEL
+                // ======================================================
+                
+                // A. Save Terms
+                if (jsonExt.newTerms && Array.isArray(jsonExt.newTerms)) {
+                    let newTermsCount = 0;
+                    for (const termObj of jsonExt.newTerms) {
+                        if (termObj.term && termObj.translation) {
+                            // Atomic Upsert to ensure it's ready for NEXT chapter immediately
+                            await Glossary.updateOne(
+                                { novelId: novel._id, term: termObj.term }, 
+                                { 
+                                    $set: { translation: termObj.translation },
+                                    $setOnInsert: { autoGenerated: true }
+                                },
+                                { upsert: true }
+                            );
+                            newTermsCount++;
+                        }
+                    }
+                    if (newTermsCount > 0) await pushLog(jobId, `✅ تم إضافة/تحديث ${newTermsCount} مصطلح للمسرد`, 'success');
+                }
+
+                // B. Update Novel Content (Replace English with Arabic)
+                novel.chapters[chapterIndex].title = `الفصل ${chapterNum}`; // Or extract title from text if needed
+                novel.chapters[chapterIndex].content = translatedText;
+                novel.markModified('chapters');
+                await novel.save();
+
+                // C. Update Job
+                await TranslationJob.findByIdAndUpdate(jobId, {
+                    $inc: { translatedCount: 1 },
+                    $set: { currentChapter: chapterNum, lastUpdate: new Date() }
+                });
+
+                await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} بالكامل`, 'success');
+
+            } catch (err) {
+                console.error("Extraction Error:", err);
+                await pushLog(jobId, `⚠️ فشل الاستخراج (تم حفظ الترجمة فقط): ${err.message}`, 'warning');
+                
+                // Save translation even if extraction failed
+                novel.chapters[chapterIndex].content = translatedText;
+                novel.markModified('chapters');
+                await novel.save();
+            }
+
+            await delay(2000); // Cool down
         }
 
         await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
-        await pushLog(jobId, `🎉 اكتملت المهمة!`, 'success');
+        await pushLog(jobId, `🏁 اكتملت جميع الفصول!`, 'success');
 
     } catch (e) {
-        console.error("Worker Error:", e);
+        console.error("Worker Critical Error:", e);
         await TranslationJob.findByIdAndUpdate(jobId, { status: 'failed' });
     }
 }
@@ -181,7 +221,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
                 query.title = { $regex: search, $options: 'i' };
             }
             
-            // Sort by createdAt -1 (Newest created first)
             const novels = await Novel.find(query)
                 .select('title cover chapters author status createdAt')
                 .sort({ createdAt: -1 }) 
@@ -193,7 +232,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 2. Start Job (Supports Resume & Ranges)
+    // 2. Start Job
     app.post('/api/translator/start', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { novelId, chapters, apiKeys, resumeFrom } = req.body; 
@@ -204,7 +243,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             let targetChapters = [];
             
             if (resumeFrom) {
-                // Resume logic: translate all chapters AFTER resumeFrom
                 targetChapters = novel.chapters
                     .filter(c => c.number >= resumeFrom)
                     .map(c => c.number);
@@ -213,9 +251,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             } else if (Array.isArray(chapters)) {
                 targetChapters = chapters;
             }
-
-            // Ensure we have keys (either passed or from settings)
-            // Logic handled inside worker, but we can verify here too if needed.
 
             const job = new TranslationJob({
                 novelId,
@@ -257,18 +292,17 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 4. Get Job Details (Enhanced for Analytics)
+    // 4. Get Job Details
     app.get('/api/translator/jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const job = await TranslationJob.findById(req.params.id);
             if (!job) return res.status(404).json({message: "Job not found"});
 
-            // Fetch novel to check current max chapter
             const novel = await Novel.findById(job.novelId).select('chapters');
             const maxChapter = novel ? (novel.chapters.length > 0 ? Math.max(...novel.chapters.map(c => c.number)) : 0) : 0;
 
             const response = job.toObject();
-            response.novelMaxChapter = maxChapter; // For resume logic
+            response.novelMaxChapter = maxChapter;
             
             res.json(response);
         } catch (e) {
@@ -276,7 +310,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 5. Manage Glossary (With Bulk & Search)
+    // 5. Manage Glossary
     app.get('/api/translator/glossary/:novelId', verifyToken, async (req, res) => {
         try {
             const terms = await Glossary.find({ novelId: req.params.novelId });
@@ -289,7 +323,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.post('/api/translator/glossary', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { novelId, term, translation } = req.body;
-            // Upsert logic
             const newTerm = await Glossary.findOneAndUpdate(
                 { novelId, term },
                 { translation, autoGenerated: false },
@@ -310,7 +343,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
     
-    // Bulk Delete Glossary
     app.post('/api/translator/glossary/bulk-delete', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { ids } = req.body;
@@ -321,7 +353,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 6. Translator Settings API (Including Keys)
+    // 6. Translator Settings API
     app.get('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
             let settings = await Settings.findOne({ user: req.user.id });
