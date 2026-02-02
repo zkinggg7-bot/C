@@ -56,7 +56,7 @@ const isChapterHidden = (title) => {
     return forbidden.some(word => lower.includes(word));
 };
 
-// 🔥 Fixed Categories (Baseline)
+// 🔥 Fixed Categories (Baseline) - Used for suggestions, not mapping
 const FIXED_CATEGORIES = [
     'أكشن', 'رومانسي', 'فانتازيا', 'شيانشيا', 'شوانهوان', 'وشيا', 
     'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
@@ -519,14 +519,16 @@ module.exports = function(app, verifyToken, upload) {
                  ];
             }
 
+            // 🔥 FIX: Direct match for categories (Dynamic)
             if (category && category !== 'all') {
-                const mappedCategory = CATEGORY_MAP[category] || category;
-                matchStage.$or = [{ category: mappedCategory }, { tags: mappedCategory }];
+                // Search for the category string exactly as provided
+                matchStage.$or = [{ category: category }, { tags: category }];
             }
 
             if (status && status !== 'all') {
-                const mappedStatus = STATUS_MAP[status] || status;
-                matchStage.status = mappedStatus;
+                // Keep status mapping if needed, or rely on frontend sending correct values
+                // For safety, we keep basic status check
+                matchStage.status = status; 
             }
 
             if (filter === 'latest_updates') {
