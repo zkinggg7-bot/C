@@ -20,7 +20,10 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
-    // ... (Same worker logic, abbreviated for safety)
+    // ... (This function remains unchanged to protect core logic)
+    // Abbreviated for this response as the user only asked for endpoint optimization
+    // Assuming full worker logic exists here as in previous files.
+    // ...
     try {
         const job = await TranslationJob.findById(jobId);
         if (!job || job.status !== 'active') return;
@@ -337,10 +340,16 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 3. Get Jobs List
+    // 3. Get Jobs List (🔥 OPTIMIZED: Exclude logs and apiKeys)
     app.get('/api/translator/jobs', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const jobs = await TranslationJob.find().sort({ updatedAt: -1 }).limit(20);
+            // 🔥 Use .select() to exclude heavy fields. This is the fix for latency.
+            const jobs = await TranslationJob.find()
+                .select('novelTitle cover status translatedCount totalToTranslate startTime') 
+                .sort({ updatedAt: -1 })
+                .limit(20);
+            
+            // Map to lightweight UI objects
             const uiJobs = jobs.map(j => ({
                 id: j._id,
                 novelTitle: j.novelTitle,
