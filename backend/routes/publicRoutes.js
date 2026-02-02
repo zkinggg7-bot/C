@@ -56,8 +56,8 @@ const isChapterHidden = (title) => {
     return forbidden.some(word => lower.includes(word));
 };
 
-// 🔥 Fixed Categories (Baseline) - Used for suggestions, not mapping
-const FIXED_CATEGORIES = [
+// 🔥 Fixed Categories (Baseline) - If DB is empty
+const BASE_CATEGORIES = [
     'أكشن', 'رومانسي', 'فانتازيا', 'شيانشيا', 'شوانهوان', 'وشيا', 
     'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
 ];
@@ -65,30 +65,35 @@ const FIXED_CATEGORIES = [
 module.exports = function(app, verifyToken, upload) {
 
     // =========================================================
-    // 📂 CATEGORIES API (Dynamic Extraction)
+    // 📂 CATEGORIES API (Managed + Dynamic fallback)
     // =========================================================
     app.get('/api/categories', async (req, res) => {
         try {
-            // 1. Get distinct categories from all novels
-            const distinctCategories = await Novel.distinct('category');
+            // 1. Try to fetch from Admin Settings (The Source of Truth)
+            const adminSettings = await Settings.findOne({ 
+                managedCategories: { $exists: true, $not: { $size: 0 } } 
+            }).sort({ updatedAt: -1 }); // Get latest active settings if multiple admins
+
+            let masterList = [];
             
-            // 2. Get distinct tags from all novels
-            const distinctTags = await Novel.distinct('tags');
+            if (adminSettings && adminSettings.managedCategories && adminSettings.managedCategories.length > 0) {
+                masterList = adminSettings.managedCategories;
+            } else {
+                // Fallback: Combine Fixed + Dynamic from Novels
+                const distinctCategories = await Novel.distinct('category');
+                const distinctTags = await Novel.distinct('tags');
+                masterList = [
+                    ...BASE_CATEGORIES,
+                    ...distinctCategories.filter(c => c), 
+                    ...distinctTags.filter(t => t)
+                ];
+            }
 
-            // 3. Merge with fixed categories and remove duplicates
-            const allCats = new Set([
-                ...FIXED_CATEGORIES,
-                ...distinctCategories.filter(c => c), // Remove null/empty
-                ...distinctTags.filter(t => t)
-            ]);
+            // Remove duplicates and sort
+            const uniqueCats = Array.from(new Set(masterList)).sort();
 
-            // 4. Convert to array and sort
-            const sortedCats = Array.from(allCats).sort();
-
-            // Return simple objects for the UI
-            const responseData = sortedCats.map(c => ({ id: c, name: c }));
-            
-            // Add 'All' option at the beginning
+            // Return objects
+            const responseData = uniqueCats.map(c => ({ id: c, name: c }));
             responseData.unshift({ id: 'all', name: 'الكل' });
 
             res.json(responseData);
@@ -519,15 +524,12 @@ module.exports = function(app, verifyToken, upload) {
                  ];
             }
 
-            // 🔥 FIX: Direct match for categories (Dynamic)
+            // 🔥 FIX: Direct match for categories
             if (category && category !== 'all') {
-                // Search for the category string exactly as provided
                 matchStage.$or = [{ category: category }, { tags: category }];
             }
 
             if (status && status !== 'all') {
-                // Keep status mapping if needed, or rely on frontend sending correct values
-                // For safety, we keep basic status check
                 matchStage.status = status; 
             }
 
