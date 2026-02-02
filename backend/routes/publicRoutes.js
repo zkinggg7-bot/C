@@ -925,4 +925,29 @@ module.exports = function(app, verifyToken, upload) {
             res.status(500).json({ error: error.message });
         }
     });
+
+    // 🔥🔥🔥 MARK ALL AS READ 🔥🔥🔥
+    app.post('/api/notifications/mark-read', verifyToken, async (req, res) => {
+        try {
+            // Fetch all favorite library entries for the user
+            const libraryItems = await NovelLibrary.find({ user: req.user.id, isFavorite: true });
+            
+            const updates = libraryItems.map(async (item) => {
+                const novel = await Novel.findById(item.novelId).select('chapters.number');
+                if (novel && novel.chapters) {
+                    const allChapters = novel.chapters.map(c => c.number);
+                    // Merge existing read chapters with all available chapters
+                    // converting to Set to remove duplicates, then back to array
+                    const newReadSet = new Set([...(item.readChapters || []), ...allChapters]);
+                    item.readChapters = Array.from(newReadSet);
+                    return item.save();
+                }
+            });
+
+            await Promise.all(updates);
+            res.json({ message: "Marked all as read" });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
 };
