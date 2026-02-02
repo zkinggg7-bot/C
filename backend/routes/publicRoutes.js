@@ -48,7 +48,7 @@ async function checkNovelStatus(novel) {
     return novel;
 }
 
-// 🔥 Helper for Forbidden Words Filter (Used in detail view mainly)
+// 🔥 Helper for Forbidden Words Filter
 const isChapterHidden = (title) => {
     if (!title) return true;
     const lower = title.toLowerCase();
@@ -56,10 +56,31 @@ const isChapterHidden = (title) => {
     return forbidden.some(word => lower.includes(word));
 };
 
+// 🔥 Mappings for Filtering (English -> Arabic DB Values)
+const CATEGORY_MAP = {
+    'action': 'أكشن',
+    'romance': 'رومانسي',
+    'fantasy': 'فانتازيا',
+    'xianxia': 'شيانشيا',
+    'xuanhuan': 'شوانهوان',
+    'wuxia': 'وشيا',
+    'adventure': 'مغامرات',
+    'system': 'نظام',
+    'harem': 'حريم',
+    'horror': 'رعب',
+    'scifi': 'خيال علمي'
+};
+
+const STATUS_MAP = {
+    'ongoing': 'مستمرة',
+    'completed': 'مكتملة',
+    'stopped': 'متوقفة'
+};
+
 module.exports = function(app, verifyToken, upload) {
 
     // =========================================================
-    // 🖼️ UPLOAD API (User Profile Uploads)
+    // 🖼️ UPLOAD API
     // =========================================================
     app.post('/api/upload', verifyToken, upload.single('image'), async (req, res) => {
         try {
@@ -134,7 +155,6 @@ module.exports = function(app, verifyToken, upload) {
     // =========================================================
     // 💬 COMMENTS API 
     // =========================================================
-
     app.get('/api/novels/:novelId/comments', async (req, res) => {
         try {
             const { novelId } = req.params;
@@ -171,7 +191,7 @@ module.exports = function(app, verifyToken, upload) {
                 .sort(sortOption)
                 .skip((page - 1) * limit)
                 .limit(parseInt(limit))
-                .lean(); // Faster
+                .lean(); 
 
             const validComments = comments.filter(c => c.user !== null);
             const totalComments = await Comment.countDocuments(query);
@@ -299,7 +319,7 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // =========================================================
-    // 👤 USER PROFILE API (🚀 HIGH PERFORMANCE 🚀)
+    // 👤 USER PROFILE API
     // =========================================================
 
     app.put('/api/user/profile', verifyToken, async (req, res) => {
@@ -463,7 +483,7 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // 🔥🔥 THE FIX: Rocket Speed Home Screen Aggregation 🔥🔥
+    // 🔥🔥 THE FIX: Rocket Speed Home Screen Aggregation & Fixed Filtering 🔥🔥
     app.get('/api/novels', async (req, res) => {
         try {
             const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
@@ -484,12 +504,19 @@ module.exports = function(app, verifyToken, upload) {
                      { author: { $regex: search, $options: 'i' } }
                  ];
             }
+
+            // 🔥 FIX: Mapping for Category and Status
             if (category && category !== 'all') {
-                matchStage.$or = [{ category: category }, { tags: category }];
+                // Try finding exact match or mapped Arabic value
+                const mappedCategory = CATEGORY_MAP[category] || category;
+                matchStage.$or = [{ category: mappedCategory }, { tags: mappedCategory }];
             }
+
             if (status && status !== 'all') {
-                matchStage.status = status;
+                const mappedStatus = STATUS_MAP[status] || status;
+                matchStage.status = mappedStatus;
             }
+
             if (filter === 'latest_updates') {
                 matchStage["chapters.0"] = { $exists: true };
             }
@@ -510,15 +537,9 @@ module.exports = function(app, verifyToken, upload) {
                  sortStage = { chaptersCount: -1 };
             }
 
-            // --- SMART FILTERING ---
-            // Only perform expensive regex filtering for non-admins on chapters
-            // But to save speed, we will just filter the *last chapter* we display.
-            // For the count, we will rely on raw size to be fast, OR filter if necessary.
-            // Optimized approach: Filter strictly for display.
+            // 🔥 Optimization: Do NOT carry the `chapters` array through the pipeline.
+            // We only need the COUNT and potentially the LAST item.
             
-            let chaptersFilter = "$chapters"; 
-            
-            // Simple projection first to avoid heavy processing
             const pipeline = [
                 { $match: matchStage },
                 { 
@@ -536,30 +557,12 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
-                        // 🔥 1. Count ALL chapters fast
+                        // 🔥 1. Count ALL chapters fast using DB size operator
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
                         
-                        // 🔥 2. Extract LAST chapter for "Latest" view efficiently
-                        // If not admin, we try to filter. But $filter on huge array is slow.
-                        // Best compromise: Take the last 5, filter those in memory, return 1.
-                        // OR, just return the raw last chapter and let frontend hide if "Chapter" in title?
-                        // No, frontend needs to know.
-                        
-                        // Optimized: Just get the last item. We will filter in next stage if needed.
-                        lastChaptersArray: { $slice: ["$chapters", -1] } 
-                    }
-                },
-                // Clean up the projection
-                {
-                    $addFields: {
-                        // Extract single object from array
-                        lastChapter: { $arrayElemAt: ["$lastChaptersArray", 0] }
-                    }
-                },
-                {
-                    $project: {
-                        lastChaptersArray: 0, // Remove array to save bandwidth
-                        chapters: 0 // ENSURE FULL ARRAY IS GONE
+                        // 🔥 2. Extract ONLY the LAST chapter object directly.
+                        // This prevents loading the full array into memory.
+                        lastChapter: { $arrayElemAt: ["$chapters", -1] }
                     }
                 },
                 { $sort: sortStage },
@@ -575,24 +578,19 @@ module.exports = function(app, verifyToken, upload) {
 
             let novelsData = result[0].data;
             
-            // Post-processing for non-admins: Check if last chapter is hidden type
+            // Post-processing for non-admins (Filtering the SINGLE last chapter)
             if (role !== 'admin') {
                 novelsData = novelsData.map(n => {
-                    if (n.lastChapter && isChapterHidden(n.lastChapter.title)) {
-                        // If the very last chapter is raw/hidden, maybe show "New Update" generic?
-                        // Or just clear it so users don't see "Chapter 1055"
-                        // But keep the count.
-                        // For now, let's keep it but maybe hide title if really sensitive.
-                        // Actually, user wants it HIDDEN if it's "Chapter".
-                        // Since we can't efficiently search backwards 2000 items in agg without lag,
-                        // we just won't show the "Latest Chapter" title if it's raw.
-                        return { ...n, chapters: n.lastChapter ? [n.lastChapter] : [] }; 
+                    // Check if the extracted last chapter is hidden
+                    let safeLastChapter = n.lastChapter;
+                    if (safeLastChapter && isChapterHidden(safeLastChapter.title)) {
+                        safeLastChapter = null; // Hide it if restricted
                     }
-                    // Map lastChapter back to a mini chapters array for frontend compatibility
-                    return { ...n, chapters: n.lastChapter ? [n.lastChapter] : [] };
+                    // Map lastChapter to chapters array format for frontend compatibility
+                    return { ...n, chapters: safeLastChapter ? [safeLastChapter] : [] };
                 });
             } else {
-                // For admin, map lastChapter to chapters array for frontend compatibility
+                // For admin, map lastChapter to chapters array
                 novelsData = novelsData.map(n => ({ ...n, chapters: n.lastChapter ? [n.lastChapter] : [] }));
             }
 
