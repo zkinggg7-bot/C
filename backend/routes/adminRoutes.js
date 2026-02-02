@@ -51,7 +51,63 @@ function escapeRegExp(string) {
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
-    // 🧹 GLOBAL CLEANER API (HACKY FIX)
+    // 📂 CATEGORY MANAGEMENT API
+    // =========================================================
+    
+    // Add New Category to Master List
+    app.post('/api/admin/categories', verifyAdmin, async (req, res) => {
+        try {
+            const { category } = req.body;
+            if (!category) return res.status(400).json({ message: "Category name required" });
+
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) settings = new Settings({ user: req.user.id });
+
+            if (!settings.managedCategories) settings.managedCategories = [];
+            
+            if (!settings.managedCategories.includes(category)) {
+                settings.managedCategories.push(category);
+                await settings.save();
+            }
+            
+            res.json({ message: "Category added", list: settings.managedCategories });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Delete Category (Remove from Master List + Remove from ALL Novels)
+    app.delete('/api/admin/categories/:name', verifyAdmin, async (req, res) => {
+        try {
+            const categoryName = decodeURIComponent(req.params.name);
+            
+            // 1. Remove from Admin Settings
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (settings && settings.managedCategories) {
+                settings.managedCategories = settings.managedCategories.filter(c => c !== categoryName);
+                await settings.save();
+            }
+
+            // 2. Remove from Novels (Tags array)
+            await Novel.updateMany(
+                { tags: categoryName },
+                { $pull: { tags: categoryName } }
+            );
+
+            // 3. Reset Main Category if matched
+            await Novel.updateMany(
+                { category: categoryName },
+                { $set: { category: 'أخرى' } }
+            );
+
+            res.json({ message: "Category deleted permanently" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
+    // 🧹 GLOBAL CLEANER API
     // =========================================================
     
     // Get Blacklist
@@ -707,4 +763,3 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 };
-    
