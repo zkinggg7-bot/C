@@ -62,7 +62,13 @@ async function processTranslationJob(jobId) {
 
         for (const chapterNum of chaptersToProcess) {
             const freshJob = await TranslationJob.findById(jobId);
-            if (!freshJob || freshJob.status !== 'active') break;
+            // 🔥 Check for pause or stop
+            if (!freshJob || freshJob.status !== 'active') {
+                if (freshJob && freshJob.status === 'paused') {
+                    await pushLog(jobId, `⏸️ تم إيقاف المهمة مؤقتاً عند الفصل ${chapterNum}`, 'warning');
+                }
+                break;
+            }
 
             const freshNovel = await Novel.findById(job.novelId);
             const chapterIndex = freshNovel.chapters.findIndex(c => c.number === chapterNum);
@@ -206,7 +212,8 @@ ${translatedText.substring(0, 8000)}
 
                 await TranslationJob.findByIdAndUpdate(jobId, {
                     $inc: { translatedCount: 1 },
-                    $set: { currentChapter: chapterNum, lastUpdate: new Date() }
+                    $set: { currentChapter: chapterNum, lastUpdate: new Date() },
+                    $pull: { targetChapters: chapterNum } // 🔥 Remove processed chapter from queue
                 });
 
                 await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} وحفظه في السيرفر`, 'success');
@@ -228,6 +235,10 @@ ${translatedText.substring(0, 8000)}
                             updates
                         );
 
+                        await TranslationJob.findByIdAndUpdate(jobId, {
+                            $pull: { targetChapters: chapterNum } // Remove even if extraction failed
+                        });
+
                         await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
                     } catch (saveErr) {
                         await pushLog(jobId, `❌ فشل الحفظ النهائي: ${saveErr.message}`, 'error');
@@ -240,8 +251,12 @@ ${translatedText.substring(0, 8000)}
             await delay(2000); 
         }
 
-        await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
-        await pushLog(jobId, `🏁 اكتملت جميع الفصول!`, 'success');
+        // Final check
+        const finalJob = await TranslationJob.findById(jobId);
+        if (finalJob.status === 'active') {
+            await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
+            await pushLog(jobId, `🏁 اكتملت جميع الفصول!`, 'success');
+        }
 
     } catch (e) {
         console.error("Worker Critical Error:", e);
@@ -294,8 +309,21 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     // 2. Start Job
     app.post('/api/translator/start', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            const { novelId, chapters, apiKeys, resumeFrom } = req.body; 
+            const { novelId, chapters, apiKeys, resumeFrom, jobId } = req.body; 
             
+            // 🔥 Resume existing job
+            if (jobId) {
+                const existingJob = await TranslationJob.findById(jobId);
+                if (!existingJob) return res.status(404).json({ message: "Job not found" });
+                
+                existingJob.status = 'active';
+                existingJob.logs.push({ message: '▶️ تم استئناف المهمة', type: 'info' });
+                await existingJob.save();
+                
+                processTranslationJob(existingJob._id);
+                return res.json({ message: "Job resumed", jobId: existingJob._id });
+            }
+
             const novel = await Novel.findById(novelId);
             if (!novel) return res.status(404).json({ message: "Novel not found" });
 
@@ -335,6 +363,32 @@ module.exports = function(app, verifyToken, verifyAdmin) {
             processTranslationJob(job._id);
 
             res.json({ message: "Job started", jobId: job._id });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 Pause Job
+    app.post('/api/translator/jobs/:id/pause', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            const job = await TranslationJob.findById(req.params.id);
+            if (!job) return res.status(404).json({ message: "Job not found" });
+            
+            job.status = 'paused';
+            job.logs.push({ message: '⏸️ طلب إيقاف مؤقت من المستخدم...', type: 'warning' });
+            await job.save();
+            
+            res.json({ message: "Job paused" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥 Delete Job
+    app.delete('/api/translator/jobs/:id', verifyToken, verifyAdmin, async (req, res) => {
+        try {
+            await TranslationJob.findByIdAndDelete(req.params.id);
+            res.json({ message: "Job deleted" });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
