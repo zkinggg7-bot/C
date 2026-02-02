@@ -380,6 +380,11 @@ module.exports = function(app, verifyToken, upload) {
         try {
             let targetUserId = req.user.id;
             let targetUser = null;
+            
+            // Pagination Params
+            const page = parseInt(req.query.page) || 1;
+            const limit = parseInt(req.query.limit) || 20;
+            const skip = (page - 1) * limit;
 
             if (req.query.userId) {
                 targetUserId = req.query.userId;
@@ -423,7 +428,8 @@ module.exports = function(app, verifyToken, upload) {
             const addedChapters = worksStats[0] ? worksStats[0].totalChapters : 0;
             const totalViews = worksStats[0] ? worksStats[0].totalViews : 0;
 
-            // 3. Lightweight My Works List
+            // 3. Lightweight My Works List (PAGINATED)
+            // Sort: Descending (First Added to Last Added -> Newest first) - createdAt: -1
             const myWorks = await Novel.aggregate([
                 { 
                     $match: { 
@@ -440,10 +446,13 @@ module.exports = function(app, verifyToken, upload) {
                         cover: 1,
                         status: 1,
                         views: 1,
+                        createdAt: 1,
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
                     }
                 },
-                { $sort: { createdAt: -1 } }
+                { $sort: { createdAt: -1 } }, // Descending (Newest First)
+                { $skip: skip },
+                { $limit: limit }
             ]);
             
             res.json({
@@ -461,7 +470,8 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks
+                myWorks: myWorks,
+                worksPage: page
             });
 
         } catch (error) {
@@ -767,7 +777,11 @@ module.exports = function(app, verifyToken, upload) {
 
     app.get('/api/novel/library', verifyToken, async (req, res) => {
         try {
-            const { type, userId } = req.query; 
+            const { type, userId, page = 1, limit = 20 } = req.query; 
+            const pageNum = parseInt(page);
+            const limitNum = parseInt(limit);
+            const skip = (pageNum - 1) * limitNum;
+
             let targetId = req.user.id;
             
             if (userId) {
@@ -783,7 +797,12 @@ module.exports = function(app, verifyToken, upload) {
             if (type === 'favorites') query.isFavorite = true;
             else if (type === 'history') query.progress = { $gt: 0 };
             
-            const items = await NovelLibrary.find(query).sort({ lastReadAt: -1 }).lean();
+            const items = await NovelLibrary.find(query)
+                .sort({ lastReadAt: -1 })
+                .skip(skip)
+                .limit(limitNum)
+                .lean();
+            
             res.json(items);
         } catch (error) {
             res.status(500).json({ message: error.message });
