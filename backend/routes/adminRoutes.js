@@ -762,4 +762,40 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             res.status(500).json({ error: error.message });
         }
     });
+
+    // 🔥🔥 BATCH DELETE CHAPTERS API 🔥🔥
+    app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
+        try {
+            const { novelId, chapterNumbers } = req.body;
+            
+            if (!novelId || !Array.isArray(chapterNumbers) || chapterNumbers.length === 0) {
+                return res.status(400).json({ message: "Invalid request data" });
+            }
+
+            const novel = await Novel.findById(novelId);
+            if (!novel) return res.status(404).json({ message: "Novel not found" });
+
+            if (req.user.role !== 'admin' && novel.authorEmail !== req.user.email) {
+                return res.status(403).json({ message: "Access Denied" });
+            }
+
+            // 1. Remove from MongoDB metadata
+            novel.chapters = novel.chapters.filter(c => !chapterNumbers.includes(c.number));
+            await novel.save();
+
+            // 2. Remove from Firestore content
+            if (firestore) {
+                const batch = firestore.batch();
+                chapterNumbers.forEach(num => {
+                    const docRef = firestore.collection('novels').doc(novelId).collection('chapters').doc(num.toString());
+                    batch.delete(docRef);
+                });
+                await batch.commit();
+            }
+
+            res.json({ message: `Deleted ${chapterNumbers.length} chapters` });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
 };
