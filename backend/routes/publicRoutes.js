@@ -52,7 +52,7 @@ async function checkNovelStatus(novel) {
 const isChapterHidden = (title) => {
     if (!title) return true;
     const lower = title.toLowerCase();
-    const forbidden = ['chapter', 'ago', 'month', 'week', 'day', 'year'];
+    const forbidden = ['chapter', 'ago', 'month', 'week', 'day', 'year', 'years', 'months', 'weeks', 'days'];
     return forbidden.some(word => lower.includes(word));
 };
 
@@ -297,7 +297,7 @@ module.exports = function(app, verifyToken, upload) {
     });
 
     // =========================================================
-    // 👤 USER PROFILE API
+    // 👤 USER PROFILE API (🔥 OPTIMIZED PERFORMANCE 🔥)
     // =========================================================
 
     app.put('/api/user/profile', verifyToken, async (req, res) => {
@@ -348,6 +348,7 @@ module.exports = function(app, verifyToken, upload) {
 
             if (!targetUser) return res.status(404).json({ message: "User not found" });
 
+            // 1. Library Stats (Read Chapters)
             const libraryStats = await NovelLibrary.aggregate([
                 { $match: { user: new mongoose.Types.ObjectId(targetUserId) } },
                 { $project: { readCount: { $size: { $ifNull: ["$readChapters", []] } } } },
@@ -355,21 +356,38 @@ module.exports = function(app, verifyToken, upload) {
             ]);
             const totalReadChapters = libraryStats[0] ? libraryStats[0].totalRead : 0;
 
-            let addedChapters = 0;
-            let totalViews = 0;
-            let myWorks = [];
+            // 2. 🔥 OPTIMIZED: Aggregation for My Works Stats
+            // Instead of fetching all documents and looping in Node.js, we do it in MongoDB
+            const worksStats = await Novel.aggregate([
+                { 
+                    $match: { 
+                        $or: [
+                            { authorEmail: targetUser.email },
+                            { author: { $regex: new RegExp(`^${targetUser.name}$`, 'i') } } 
+                        ]
+                    } 
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalViews: { $sum: "$views" },
+                        totalChapters: { $sum: { $size: { $ifNull: ["$chapters", []] } } }
+                    }
+                }
+            ]);
 
-            myWorks = await Novel.find({ 
+            const addedChapters = worksStats[0] ? worksStats[0].totalChapters : 0;
+            const totalViews = worksStats[0] ? worksStats[0].totalViews : 0;
+
+            // 3. Fetch list of works (Lightweight projection)
+            const myWorks = await Novel.find({ 
                 $or: [
                     { authorEmail: targetUser.email },
                     { author: { $regex: new RegExp(`^${targetUser.name}$`, 'i') } } 
                 ]
-            }).select('title cover status views chapters');
-            
-            myWorks.forEach(novel => {
-                addedChapters += (novel.chapters ? novel.chapters.length : 0);
-                totalViews += (novel.views || 0);
-            });
+            })
+            .select('title cover status views chapters') // We still need chapters to count length for the list item
+            .lean();
 
             const lightWorks = myWorks.map(novel => ({
                 _id: novel._id,
@@ -497,7 +515,7 @@ module.exports = function(app, verifyToken, upload) {
                         as: "ch",
                         cond: {
                             $eq: [
-                                { $regexMatch: { input: "$$ch.title", regex: "chapter|ago|month|week|day|year", options: "i" } },
+                                { $regexMatch: { input: "$$ch.title", regex: "chapter|ago|month|week|day|year|years|months|weeks|days", options: "i" } },
                                 false
                             ]
                         }
