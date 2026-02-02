@@ -56,28 +56,47 @@ const isChapterHidden = (title) => {
     return forbidden.some(word => lower.includes(word));
 };
 
-// 🔥 Mappings for Filtering (English -> Arabic DB Values)
-const CATEGORY_MAP = {
-    'action': 'أكشن',
-    'romance': 'رومانسي',
-    'fantasy': 'فانتازيا',
-    'xianxia': 'شيانشيا',
-    'xuanhuan': 'شوانهوان',
-    'wuxia': 'وشيا',
-    'adventure': 'مغامرات',
-    'system': 'نظام',
-    'harem': 'حريم',
-    'horror': 'رعب',
-    'scifi': 'خيال علمي'
-};
-
-const STATUS_MAP = {
-    'ongoing': 'مستمرة',
-    'completed': 'مكتملة',
-    'stopped': 'متوقفة'
-};
+// 🔥 Fixed Categories (Baseline)
+const FIXED_CATEGORIES = [
+    'أكشن', 'رومانسي', 'فانتازيا', 'شيانشيا', 'شوانهوان', 'وشيا', 
+    'مغامرات', 'نظام', 'حريم', 'رعب', 'خيال علمي', 'دراما', 'غموض', 'تاريخي'
+];
 
 module.exports = function(app, verifyToken, upload) {
+
+    // =========================================================
+    // 📂 CATEGORIES API (Dynamic Extraction)
+    // =========================================================
+    app.get('/api/categories', async (req, res) => {
+        try {
+            // 1. Get distinct categories from all novels
+            const distinctCategories = await Novel.distinct('category');
+            
+            // 2. Get distinct tags from all novels
+            const distinctTags = await Novel.distinct('tags');
+
+            // 3. Merge with fixed categories and remove duplicates
+            const allCats = new Set([
+                ...FIXED_CATEGORIES,
+                ...distinctCategories.filter(c => c), // Remove null/empty
+                ...distinctTags.filter(t => t)
+            ]);
+
+            // 4. Convert to array and sort
+            const sortedCats = Array.from(allCats).sort();
+
+            // Return simple objects for the UI
+            const responseData = sortedCats.map(c => ({ id: c, name: c }));
+            
+            // Add 'All' option at the beginning
+            responseData.unshift({ id: 'all', name: 'الكل' });
+
+            res.json(responseData);
+        } catch (error) {
+            console.error("Categories Fetch Error:", error);
+            res.status(500).json({ error: error.message });
+        }
+    });
 
     // =========================================================
     // 🖼️ UPLOAD API
@@ -160,7 +179,6 @@ module.exports = function(app, verifyToken, upload) {
             const { novelId } = req.params;
             const { sort = 'newest', page = 1, limit = 20, chapterNumber } = req.query;
             
-            // Optimize: Only select reactions field
             const novel = await Novel.findById(novelId).select('reactions').lean();
             let stats = { like: 0, love: 0, funny: 0, sad: 0, angry: 0, total: 0, userReaction: null };
             
@@ -353,7 +371,6 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // 🔥🔥 THE FIX: Lightweight Aggregation for User Stats 🔥🔥
     app.get('/api/user/stats', verifyToken, async (req, res) => {
         try {
             let targetUserId = req.user.id;
@@ -371,7 +388,7 @@ module.exports = function(app, verifyToken, upload) {
 
             if (!targetUser) return res.status(404).json({ message: "User not found" });
 
-            // 1. Library Stats (Read Chapters Count Only)
+            // 1. Library Stats
             const libraryStats = await NovelLibrary.aggregate([
                 { $match: { user: new mongoose.Types.ObjectId(targetUserId) } },
                 { $project: { readCount: { $size: { $ifNull: ["$readChapters", []] } } } },
@@ -379,7 +396,7 @@ module.exports = function(app, verifyToken, upload) {
             ]);
             const totalReadChapters = libraryStats[0] ? libraryStats[0].totalRead : 0;
 
-            // 2. My Works Stats (Aggregated DB Side)
+            // 2. My Works Stats
             const worksStats = await Novel.aggregate([
                 { 
                     $match: { 
@@ -401,7 +418,7 @@ module.exports = function(app, verifyToken, upload) {
             const addedChapters = worksStats[0] ? worksStats[0].totalChapters : 0;
             const totalViews = worksStats[0] ? worksStats[0].totalViews : 0;
 
-            // 3. Lightweight My Works List (NO CHAPTERS ARRAY)
+            // 3. Lightweight My Works List
             const myWorks = await Novel.aggregate([
                 { 
                     $match: { 
@@ -418,7 +435,6 @@ module.exports = function(app, verifyToken, upload) {
                         cover: 1,
                         status: 1,
                         views: 1,
-                        // Count chapters in DB, DO NOT return array
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } }
                     }
                 },
@@ -440,7 +456,7 @@ module.exports = function(app, verifyToken, upload) {
                 readChapters: totalReadChapters,
                 addedChapters,
                 totalViews,
-                myWorks: myWorks // Now lightweight
+                myWorks: myWorks
             });
 
         } catch (error) {
@@ -478,12 +494,11 @@ module.exports = function(app, verifyToken, upload) {
                 return res.status(200).json({ viewed: false, message: 'Already viewed this chapter', total: novel.views });
             }
         } catch (error) { 
-            // console.error("View Count Error:", error);
             res.status(500).send('Error'); 
         }
     });
 
-    // 🔥🔥 THE FIX: Rocket Speed Home Screen Aggregation & Fixed Filtering 🔥🔥
+    // 🔥 Rocket Speed Home Screen Aggregation 🔥
     app.get('/api/novels', async (req, res) => {
         try {
             const { filter, search, category, status, sort, page = 1, limit = 20, timeRange } = req.query;
@@ -492,7 +507,6 @@ module.exports = function(app, verifyToken, upload) {
             const skip = (pageNum - 1) * limitNum;
             let matchStage = {};
 
-            // Visibility Check
             const role = getUserRole(req);
             if (role !== 'admin') {
                 matchStage.status = { $ne: 'خاصة' };
@@ -505,9 +519,7 @@ module.exports = function(app, verifyToken, upload) {
                  ];
             }
 
-            // 🔥 FIX: Mapping for Category and Status
             if (category && category !== 'all') {
-                // Try finding exact match or mapped Arabic value
                 const mappedCategory = CATEGORY_MAP[category] || category;
                 matchStage.$or = [{ category: mappedCategory }, { tags: mappedCategory }];
             }
@@ -537,9 +549,6 @@ module.exports = function(app, verifyToken, upload) {
                  sortStage = { chaptersCount: -1 };
             }
 
-            // 🔥 Optimization: Do NOT carry the `chapters` array through the pipeline.
-            // We only need the COUNT and potentially the LAST item.
-            
             const pipeline = [
                 { $match: matchStage },
                 { 
@@ -557,11 +566,7 @@ module.exports = function(app, verifyToken, upload) {
                         lastChapterUpdate: 1,
                         createdAt: 1,
                         rating: 1,
-                        // 🔥 1. Count ALL chapters fast using DB size operator
                         chaptersCount: { $size: { $ifNull: ["$chapters", []] } },
-                        
-                        // 🔥 2. Extract ONLY the LAST chapter object directly.
-                        // This prevents loading the full array into memory.
                         lastChapter: { $arrayElemAt: ["$chapters", -1] }
                     }
                 },
@@ -578,19 +583,15 @@ module.exports = function(app, verifyToken, upload) {
 
             let novelsData = result[0].data;
             
-            // Post-processing for non-admins (Filtering the SINGLE last chapter)
             if (role !== 'admin') {
                 novelsData = novelsData.map(n => {
-                    // Check if the extracted last chapter is hidden
                     let safeLastChapter = n.lastChapter;
                     if (safeLastChapter && isChapterHidden(safeLastChapter.title)) {
-                        safeLastChapter = null; // Hide it if restricted
+                        safeLastChapter = null; 
                     }
-                    // Map lastChapter to chapters array format for frontend compatibility
                     return { ...n, chapters: safeLastChapter ? [safeLastChapter] : [] };
                 });
             } else {
-                // For admin, map lastChapter to chapters array
                 novelsData = novelsData.map(n => ({ ...n, chapters: n.lastChapter ? [n.lastChapter] : [] }));
             }
 
@@ -605,31 +606,25 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // 🔥 MODIFIED: Novel Details (Still needs chapters, but optimized)
     app.get('/api/novels/:id', async (req, res) => {
         try {
             if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: 'Invalid ID' });
             
-            // Fetch raw doc
             let novelDoc = await Novel.findById(req.params.id).lean();
             if (!novelDoc) return res.status(404).json({ message: 'Novel not found' });
             
-            // Visibility Check
             const role = getUserRole(req);
             if (novelDoc.status === 'خاصة' && role !== 'admin') {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
-            // Update status check logic (async separately)
-            checkNovelStatus(await Novel.findById(req.params.id)); // Fire and forget for speed
+            checkNovelStatus(await Novel.findById(req.params.id)); 
 
-            // 🔥 Filter Chapters for Non-Admin
             if (role !== 'admin') {
                 if (novelDoc.chapters) {
                     novelDoc.chapters = novelDoc.chapters.filter(c => !isChapterHidden(c.title));
                 }
             } else {
-                // Even for admin, sort descending by number
                 if (novelDoc.chapters) {
                     novelDoc.chapters.sort((a, b) => b.number - a.number);
                 }
@@ -643,14 +638,12 @@ module.exports = function(app, verifyToken, upload) {
         }
     });
 
-    // ... (Remaining Chapter Content & Library Logic kept as is, they are single item fetches)
-    
     app.get('/api/novels/:novelId/chapters/:chapterId', async (req, res) => {
         try {
             const { novelId, chapterId } = req.params;
             if (!mongoose.Types.ObjectId.isValid(novelId)) return res.status(404).json({ message: 'Invalid ID' });
 
-            const novel = await Novel.findById(novelId).lean(); // Lean for speed
+            const novel = await Novel.findById(novelId).lean();
             if (!novel) return res.status(404).json({ message: 'Novel not found' });
 
             const role = getUserRole(req);
@@ -679,7 +672,6 @@ module.exports = function(app, verifyToken, upload) {
                 }
             }
 
-            // Cleaner logic... (kept same)
             try {
                 const adminSettings = await Settings.findOne({ globalBlocklist: { $exists: true, $not: { $size: 0 } } }).lean();
                 if (adminSettings && adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
@@ -800,61 +792,113 @@ module.exports = function(app, verifyToken, upload) {
         res.json(item || { isFavorite: false, progress: 0, lastChapterId: 0, readChapters: [] });
     });
 
+    // 🔥🔥🔥 OPTIMIZED NOTIFICATIONS USING AGGREGATION 🔥🔥🔥
     app.get('/api/notifications', verifyToken, async (req, res) => {
         try {
-            const favorites = await NovelLibrary.find({ user: req.user.id, isFavorite: true }).lean();
-            if (!favorites || favorites.length === 0) return res.json({ notifications: [], totalUnread: 0 });
+            const userId = new mongoose.Types.ObjectId(req.user.id);
 
-            const favIds = favorites.map(f => f.novelId);
+            // 1. Get User Favorites (NovelLibrary)
+            // 2. Lookup actual Novels data
+            // 3. Compare dates efficiently inside DB
             
-            // Optimized query: Only select necessary fields
-            const novels = await Novel.find({ _id: { $in: favIds } })
-                .select('title cover chapters lastChapterUpdate status')
-                .lean();
-
-            let notifications = [];
-            let totalUnread = 0;
-
-            novels.forEach(novel => {
-                if (novel.status === 'خاصة') return;
-
-                const libraryEntry = favorites.find(f => f.novelId.toString() === novel._id.toString());
-                const readList = libraryEntry.readChapters || [];
-                const libCreatedAt = new Date(libraryEntry.createdAt);
-                
-                // This filter in JS is unavoidable for notifications logic, 
-                // but usually user has few favorites (<100).
-                const newUnreadChapters = (novel.chapters || []).filter(ch => {
-                    const isTranslated = !isChapterHidden(ch.title);
-                    const chapDate = new Date(ch.createdAt);
-                    const isNewer = chapDate > libCreatedAt;
-                    const isUnread = !readList.includes(ch.number);
-                    return isNewer && isUnread && isTranslated;
-                });
-                
-                if (newUnreadChapters.length > 0) {
-                    const count = newUnreadChapters.length;
-                    const lastChapter = novel.chapters.filter(c => !isChapterHidden(c.title)).pop();
-                    
-                    if (lastChapter) {
-                        notifications.push({
-                            _id: novel._id,
-                            title: novel.title,
-                            cover: novel.cover,
-                            newChaptersCount: count,
-                            lastChapterNumber: lastChapter.number,
-                            lastChapterTitle: lastChapter.title,
-                            updatedAt: novel.lastChapterUpdate
-                        });
-                        totalUnread += count;
+            const pipeline = [
+                // Step 1: Match user's favorite library entries
+                { 
+                    $match: { 
+                        user: userId, 
+                        isFavorite: true 
+                    } 
+                },
+                // Step 2: Convert novelId string to ObjectId for lookup (if needed, assuming NovelLibrary uses string for novelId based on schema)
+                // Since NovelLibrarySchema says novelId: String, but Novel _id is ObjectId.
+                {
+                    $addFields: {
+                        novelIdObj: { $toObjectId: "$novelId" }
                     }
-                }
-            });
+                },
+                // Step 3: Join with Novels collection to get chapter updates
+                {
+                    $lookup: {
+                        from: 'novels',
+                        localField: 'novelIdObj',
+                        foreignField: '_id',
+                        as: 'novelData'
+                    }
+                },
+                // Step 4: Unwind the novel data (since lookup returns an array)
+                { $unwind: "$novelData" },
+                
+                // Step 5: Filter out hidden/private novels
+                { 
+                    $match: { 
+                        "novelData.status": { $ne: 'خاصة' } 
+                    } 
+                },
 
-            res.json({ notifications, totalUnread });
+                // Step 6: Filter novels where Last Update is AFTER the library creation/update
+                // This is a quick pre-filter to avoid checking chapters of old novels
+                {
+                    $match: {
+                        $expr: { $gt: ["$novelData.lastChapterUpdate", "$createdAt"] }
+                    }
+                },
+
+                // Step 7: Project only what we need to calculate unread count
+                // We calculate unread by filtering the chapters array directly in projection
+                {
+                    $project: {
+                        _id: "$novelData._id",
+                        title: "$novelData.title",
+                        cover: "$novelData.cover",
+                        lastChapterUpdate: "$novelData.lastChapterUpdate",
+                        // Get the latest chapter details
+                        lastChapter: { $arrayElemAt: ["$novelData.chapters", -1] },
+                        // Calculate unread count:
+                        // Filter chapters where createdAt > library.createdAt AND number NOT IN library.readChapters
+                        unreadCount: {
+                            $size: {
+                                $filter: {
+                                    input: "$novelData.chapters",
+                                    as: "ch",
+                                    cond: {
+                                        $and: [
+                                            { $gt: ["$$ch.createdAt", "$createdAt"] }, // Chapter is newer than when user favored it
+                                            { $not: { $in: ["$$ch.number", { $ifNull: ["$readChapters", []] }] } } // Chapter not read
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                
+                // Step 8: Only keep results with > 0 unread
+                { $match: { unreadCount: { $gt: 0 } } },
+                
+                // Step 9: Sort by latest update
+                { $sort: { lastChapterUpdate: -1 } }
+            ];
+
+            const notifications = await NovelLibrary.aggregate(pipeline);
+            
+            // Calculate total unread badge
+            const totalUnread = notifications.reduce((sum, n) => sum + n.unreadCount, 0);
+
+            // Format for UI
+            const formattedNotifications = notifications.map(n => ({
+                _id: n._id,
+                title: n.title,
+                cover: n.cover,
+                newChaptersCount: n.unreadCount,
+                lastChapterNumber: n.lastChapter ? n.lastChapter.number : 0,
+                lastChapterTitle: n.lastChapter ? n.lastChapter.title : '',
+                updatedAt: n.lastChapterUpdate
+            }));
+
+            res.json({ notifications: formattedNotifications, totalUnread });
 
         } catch (error) {
-            // console.error("Notifications Error:", error);
+            console.error("Aggregation Notifications Error:", error);
             res.status(500).json({ error: error.message });
         }
     });
