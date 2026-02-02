@@ -22,6 +22,9 @@ const settingsSchema = new mongoose.Schema({
     translatorExtractPrompt: { type: String, default: '' },
     translatorApiKeys: [{ type: String }], // Global Keys for Translator
     
+    // 🔥 Categories Management (Master List)
+    managedCategories: [{ type: String }],
+
     fontSize: { type: Number, default: 18 },
     globalBlocklist: [{ type: String }] 
 }, { timestamps: true });
