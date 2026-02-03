@@ -1,5 +1,4 @@
 
-
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -126,6 +125,48 @@ module.exports = function(app, verifyToken) {
 
         } catch (error) {
             console.error("Login Error:", error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    // =========================================================
+    // 🔐 إدارة كلمة المرور (CHANGE/CREATE PASSWORD)
+    // =========================================================
+    app.put('/auth/password', verifyToken, async (req, res) => {
+        try {
+            const { currentPassword, newPassword } = req.body;
+            const user = await User.findById(req.user.id);
+
+            if (!user) return res.status(404).json({ message: "المستخدم غير موجود" });
+
+            // 1. إذا كان المستخدم يملك كلمة مرور بالفعل (حساب عادي)، يجب التحقق منها
+            if (user.password) {
+                if (!currentPassword) {
+                    return res.status(400).json({ message: "يرجى إدخال كلمة المرور الحالية" });
+                }
+                const hashedCurrent = hashPassword(currentPassword);
+                if (user.password !== hashedCurrent) {
+                    return res.status(401).json({ message: "كلمة المرور الحالية غير صحيحة" });
+                }
+            }
+            // إذا لم يكن لديه كلمة مرور (Google)، لا نطلب كلمة المرور الحالية، نسمح له بالإنشاء مباشرة
+
+            // 2. التحقق من شروط كلمة المرور الجديدة
+            const passwordRegex = /^[a-zA-Z0-9@]{4,}$/;
+            if (!passwordRegex.test(newPassword)) {
+                return res.status(400).json({ 
+                    message: "كلمة المرور يجب أن تكون 4 خانات على الأقل وتحتوي فقط على حروف إنجليزية، أرقام، أو رمز @" 
+                });
+            }
+
+            // 3. تحديث كلمة المرور
+            user.password = hashPassword(newPassword);
+            await user.save();
+
+            res.json({ message: "تم تحديث كلمة المرور بنجاح", user });
+
+        } catch (error) {
+            console.error("Password Update Error:", error);
             res.status(500).json({ error: error.message });
         }
     });
