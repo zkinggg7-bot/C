@@ -48,6 +48,19 @@ function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// 🔥🔥 DYNAMIC CATEGORY NORMALIZATION HELPER 🔥🔥
+// Accepts the term and the list of rules fetched from DB
+function applyNormalization(term, rules) {
+    if (!term) return term;
+    if (!rules || rules.length === 0) return term;
+    
+    const t = term.trim();
+    // Find a rule where 'original' matches the term
+    const rule = rules.find(r => r.original === t);
+    
+    return rule ? rule.target : t;
+}
+
 module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
     // =========================================================
@@ -63,10 +76,14 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) settings = new Settings({ user: req.user.id });
 
+            // Apply normalization if rules exist
+            const rules = settings.categoryNormalizationRules || [];
+            const normalizedCategory = applyNormalization(category, rules);
+
             if (!settings.managedCategories) settings.managedCategories = [];
             
-            if (!settings.managedCategories.includes(category)) {
-                settings.managedCategories.push(category);
+            if (!settings.managedCategories.includes(normalizedCategory)) {
+                settings.managedCategories.push(normalizedCategory);
                 await settings.save();
             }
             
@@ -101,6 +118,120 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             );
 
             res.json({ message: "Category deleted permanently" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
+    // 🔄 NORMALIZATION RULES API (NEW)
+    // =========================================================
+
+    // Get Rules
+    app.get('/api/admin/normalization-rules', verifyAdmin, async (req, res) => {
+        try {
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) settings = new Settings({ user: req.user.id });
+            res.json(settings.categoryNormalizationRules || []);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Add/Update Rule
+    app.post('/api/admin/normalization-rules', verifyAdmin, async (req, res) => {
+        try {
+            const { original, target } = req.body;
+            if (!original || !target) return res.status(400).json({ message: "Original and Target required" });
+
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) settings = new Settings({ user: req.user.id });
+
+            if (!settings.categoryNormalizationRules) settings.categoryNormalizationRules = [];
+
+            // Remove existing rule for same original if exists
+            settings.categoryNormalizationRules = settings.categoryNormalizationRules.filter(r => r.original !== original);
+            
+            // Add new rule
+            settings.categoryNormalizationRules.push({ original, target });
+            await settings.save();
+
+            res.json(settings.categoryNormalizationRules);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Delete Rule
+    app.delete('/api/admin/normalization-rules/:original', verifyAdmin, async (req, res) => {
+        try {
+            const originalTerm = decodeURIComponent(req.params.original);
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (settings && settings.categoryNormalizationRules) {
+                settings.categoryNormalizationRules = settings.categoryNormalizationRules.filter(r => r.original !== originalTerm);
+                await settings.save();
+            }
+            res.json({ message: "Rule deleted" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // 🔥🔥 ENDPOINT: BATCH FIX DUPLICATES (USING DB RULES) 🔥🔥
+    app.post('/api/admin/categories/fix-duplicates', verifyAdmin, async (req, res) => {
+        try {
+            // 1. Fetch Rules
+            const settings = await Settings.findOne({ user: req.user.id });
+            const rules = settings ? (settings.categoryNormalizationRules || []) : [];
+
+            if (rules.length === 0) {
+                return res.json({ message: "لا توجد قواعد توحيد محفوظة. يرجى إضافة قواعد أولاً." });
+            }
+
+            const novels = await Novel.find({});
+            let updatedCount = 0;
+
+            for (const novel of novels) {
+                let modified = false;
+
+                // 2. Fix Main Category
+                const originalCat = novel.category;
+                const newCat = applyNormalization(originalCat, rules);
+                if (originalCat !== newCat) {
+                    novel.category = newCat;
+                    modified = true;
+                }
+
+                // 3. Fix Tags
+                if (novel.tags && novel.tags.length > 0) {
+                    const originalTagsJSON = JSON.stringify(novel.tags);
+                    
+                    // Map tags to normalized versions
+                    let newTags = novel.tags.map(t => applyNormalization(t, rules));
+                    
+                    // Remove duplicates
+                    newTags = [...new Set(newTags)];
+
+                    if (JSON.stringify(newTags) !== originalTagsJSON) {
+                        novel.tags = newTags;
+                        modified = true;
+                    }
+                }
+
+                if (modified) {
+                    await novel.save();
+                    updatedCount++;
+                }
+            }
+
+            // 4. Fix Managed Categories List in Settings
+            if (settings && settings.managedCategories) {
+                const newManaged = settings.managedCategories.map(c => applyNormalization(c, rules));
+                settings.managedCategories = [...new Set(newManaged)];
+                await settings.save();
+            }
+
+            res.json({ message: `تم تطبيق القواعد على ${updatedCount} رواية وتنظيف الإعدادات.` });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -356,6 +487,21 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const user = await User.findOne({ email: adminEmail });
             if (!user) return res.status(404).json({ message: "User not found" });
 
+            // 🔥🔥🔥 AUTO-NORMALIZE CATEGORIES ON IMPORT (DYNAMIC) 🔥🔥🔥
+            // Fetch Rules First based on the Admin/User
+            const settings = await Settings.findOne({ user: user._id });
+            const rules = settings ? (settings.categoryNormalizationRules || []) : [];
+
+            if (novelData.category) {
+                novelData.category = applyNormalization(novelData.category, rules);
+            }
+            if (novelData.tags && Array.isArray(novelData.tags)) {
+                // Normalize and Deduplicate
+                const rawTags = novelData.tags.map(t => applyNormalization(t, rules));
+                novelData.tags = [...new Set(rawTags)];
+            }
+            // 🔥🔥🔥 END NORMALIZATION 🔥🔥🔥
+
             let novel = await Novel.findOne({ title: novelData.title });
 
             // Image Upload Logic (Cloudinary)
@@ -400,6 +546,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                         novel.author = user.name;
                         novel.authorEmail = user.email;
                     }
+                    // Also update categories/tags on re-scrape if needed
+                    if (novelData.category) novel.category = novelData.category;
+                    if (novelData.tags) novel.tags = novelData.tags;
+
                     await novel.save();
                 }
             }
