@@ -6,7 +6,7 @@ const User = require('../models/user.model.js');
 const Settings = require('../models/settings.model.js');
 
 // 🔥 قائمة الأدمن المسموح بهم حصراً
-const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeus@gmail.com"];
+const ADMIN_EMAILS = ["flaf.aboode@gmail.com", "zeus", "zeuss@gmail.com"];
 
 // Helper: Hash Password
 const hashPassword = (password) => {
