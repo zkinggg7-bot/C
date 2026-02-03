@@ -347,7 +347,7 @@ module.exports = function(app, verifyToken, upload) {
 
     app.put('/api/user/profile', verifyToken, async (req, res) => {
         try {
-            const { name, bio, banner, picture, isHistoryPublic } = req.body;
+            const { name, bio, banner, picture, isHistoryPublic, email } = req.body;
             
             const updates = {};
             
@@ -357,6 +357,22 @@ module.exports = function(app, verifyToken, upload) {
                      return res.status(400).json({ message: "اسم المستخدم هذا مستخدم بالفعل." });
                  }
                  updates.name = name;
+            }
+
+            // 🔥 Validate and Update Email
+            if (email && email !== req.user.email) {
+                const lowerEmail = email.toLowerCase();
+                const emailRegex = /^[a-zA-Z]{5,}@gmail\.com$/;
+                if (!emailRegex.test(lowerEmail)) {
+                    return res.status(400).json({ 
+                        message: "البريد الإلكتروني يجب أن ينتهي بـ @gmail.com ويتكون الاسم قبله من أكثر من 4 حروف إنجليزية فقط." 
+                    });
+                }
+                const existingEmail = await User.findOne({ email: lowerEmail });
+                if (existingEmail) {
+                    return res.status(400).json({ message: "البريد الإلكتروني مستخدم بالفعل." });
+                }
+                updates.email = lowerEmail;
             }
             
             if (bio !== undefined) updates.bio = bio;
