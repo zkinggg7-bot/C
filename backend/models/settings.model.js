@@ -24,6 +24,13 @@ const settingsSchema = new mongoose.Schema({
     
     // 🔥 Categories Management (Master List)
     managedCategories: [{ type: String }],
+    
+    // 🔥 Category Normalization Rules (Dynamic)
+    // Example: [{ original: 'قتال', target: 'فنون قتالية' }]
+    categoryNormalizationRules: [{ 
+        original: { type: String, required: true }, 
+        target: { type: String, required: true } 
+    }],
 
     fontSize: { type: Number, default: 18 },
     globalBlocklist: [{ type: String }] 
