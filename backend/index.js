@@ -4,6 +4,7 @@
 // =================================================================
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto'); // Built-in crypto for hashing
 
 try {
     const envConfig = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
@@ -97,49 +98,118 @@ async function verifyAdmin(req, res, next) {
     });
 }
 
+// Helper: Hash Password using SHA256 (Secure enough for this context without external bcrypt)
+const hashPassword = (password) => {
+    return crypto.createHash('sha256').update(password).digest('hex');
+};
+
 // =========================================================
-// 🔄 AUTH ROUTES (Google & Test)
+// 🔄 AUTH ROUTES (Google & Real Email/Password)
 // =========================================================
 
-// 🧪 TEST AUTH API (للاختبار فقط)
+// 🟢 تسجيل حساب جديد (REAL SIGNUP)
+app.post('/auth/signup', async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
+
+        // 1. Validation Rules
+        if (!name || !email || !password) {
+            return res.status(400).json({ message: "جميع الحقول مطلوبة" });
+        }
+
+        // Email Validation: Ends with @gmail.com, Prefix > 4 English letters
+        // Regex Explanation: ^[a-zA-Z]{5,} checks for 5 or more English letters at start
+        const emailRegex = /^[a-zA-Z]{5,}@gmail\.com$/;
+        if (!emailRegex.test(email)) {
+            return res.status(400).json({ 
+                message: "البريد الإلكتروني يجب أن ينتهي بـ @gmail.com ويتكون الاسم قبله من أكثر من 4 حروف إنجليزية فقط." 
+            });
+        }
+
+        // Password Validation: Min 4 chars, English letters, numbers, @ only
+        const passwordRegex = /^[a-zA-Z0-9@]{4,}$/;
+        if (!passwordRegex.test(password)) {
+            return res.status(400).json({ 
+                message: "كلمة المرور يجب أن تكون 4 خانات على الأقل وتحتوي فقط على حروف إنجليزية، أرقام، أو رمز @" 
+            });
+        }
+
+        // 2. Check Uniqueness
+        const existingUser = await User.findOne({ 
+            $or: [{ email: email.toLowerCase() }, { name: name }] 
+        });
+        
+        if (existingUser) {
+            if (existingUser.email === email.toLowerCase()) {
+                return res.status(400).json({ message: "البريد الإلكتروني مستخدم بالفعل." });
+            }
+            return res.status(400).json({ message: "اسم المستخدم موجود بالفعل." });
+        }
+
+        // 3. Create User
+        // Note: googleId is required by schema, generating a unique local placeholder
+        const localId = `local_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        
+        let role = 'user';
+        if (ADMIN_EMAILS.includes(email.toLowerCase())) role = 'admin';
+
+        const newUser = new User({
+            googleId: localId,
+            email: email.toLowerCase(),
+            name: name,
+            password: hashPassword(password), // Storing Hashed Password
+            role: role,
+            picture: '', // Default empty or placeholder
+            createdAt: new Date()
+        });
+
+        await newUser.save();
+        await new Settings({ user: newUser._id }).save();
+
+        // 4. Generate Token
+        const payload = { id: newUser._id, googleId: newUser.googleId, name: newUser.name, email: newUser.email, role: newUser.role };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
+
+        res.json({ token, user: newUser });
+
+    } catch (error) {
+        console.error("Signup Error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 🔵 تسجيل الدخول (REAL LOGIN)
 app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        if (!email) return res.status(400).json({ message: "البريد الإلكتروني مطلوب" });
+        if (!email || !password) return res.status(400).json({ message: "البريد الإلكتروني وكلمة المرور مطلوبان" });
 
-        let user = await User.findOne({ email });
-        let role = 'user';
-        const lowerEmail = email.toLowerCase();
-        if (ADMIN_EMAILS.includes(lowerEmail)) role = 'admin';
-
+        // 1. Find User
+        const user = await User.findOne({ email: email.toLowerCase() });
+        
         if (!user) {
-            let proposedName = email.split('@')[0];
-            let counter = 1;
-            while(await User.findOne({ name: proposedName })) {
-                proposedName = `${email.split('@')[0]}_${counter}`;
-                counter++;
-            }
-            user = new User({
-                googleId: `test_${Date.now()}`, 
-                email: email,
-                name: proposedName, 
-                picture: '',
-                role: role,
-                createdAt: new Date()
-            });
-            await user.save();
-            await new Settings({ user: user._id }).save();
-        } else {
-            if (role === 'admin' && user.role !== 'admin') {
-                user.role = 'admin';
-                await user.save();
-            }
+            return res.status(404).json({ message: "البريد الإلكتروني غير مسجل." });
         }
+
+        // 2. Verify Password
+        // Note: Legacy/Google users might not have a password field.
+        if (!user.password) {
+            return res.status(400).json({ message: "هذا الحساب مسجل عبر Google، يرجى الدخول باستخدامه." });
+        }
+
+        const hashedInput = hashPassword(password);
+        if (user.password !== hashedInput) {
+            return res.status(401).json({ message: "كلمة المرور غير صحيحة." });
+        }
+
+        // 3. Generate Token
         const payload = { id: user._id, googleId: user.googleId, name: user.name, email: user.email, role: user.role };
         const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '365d' });
+        
         res.json({ token, user });
+
     } catch (error) {
-        console.error("Test Login Error:", error);
+        console.error("Login Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
