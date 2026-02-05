@@ -44,7 +44,7 @@ const settingsSchema = new mongoose.Schema({
         opacity: { type: Number, default: 1 },
         alignment: { type: String, enum: ['left', 'center', 'right'], default: 'center' },
         isBold: { type: Boolean, default: true },
-        fontSize: { type: Number, default: 14 }
+        fontSize: { type: Number, default: 14 } // 🔥 Added Control for Font Size
     },
 
     // 🔥 Frequency Control for Copyrights
