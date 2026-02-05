@@ -702,7 +702,7 @@ module.exports = function(app, verifyToken, upload) {
                 }
             }
 
-            // 🔥 CLEANER + COPYRIGHTS INJECTION 🔥
+            // 🔥 CLEANER + COPYRIGHTS + SEPARATOR INJECTION 🔥
             try {
                 // Fetch settings for both Blocklist AND Global Copyrights
                 // We assume there's a master settings doc (either created by main admin or first one found)
@@ -733,18 +733,39 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. Inject Copyrights (If they exist)
+                    // 3. 🔥 Inject Separator Line after "Chapter X: Title" or "الفصل X: Title"
+                    // Looks for start of string or newline, followed by Chapter/الفصل pattern, till end of line.
+                    const titleRegex = /(^|\n)((?:الفصل|Chapter)\s+[^:\n]+:[^\n]+)/i;
+                    if (titleRegex.test(content)) {
+                        // Append the separator literally as requested
+                        content = content.replace(titleRegex, '$1$2\n\n___________________________________________________________________________________\n\n');
+                    }
+
+                    // 4. Inject Copyrights (Styled)
                     const startText = adminSettings.globalChapterStartText;
                     const endText = adminSettings.globalChapterEndText;
+                    const style = adminSettings.globalCopyrightStyles || {};
+
+                    // Build CSS string
+                    const styleCSS = `
+                        color: ${style.color || '#888'}; 
+                        opacity: ${style.opacity || 1}; 
+                        text-align: ${style.alignment || 'center'}; 
+                        font-weight: ${style.isBold ? 'bold' : 'normal'};
+                        font-size: ${style.fontSize || 14}px;
+                        margin: 20px 0;
+                        padding: 10px 0;
+                        border-${startText ? 'bottom' : 'top'}: 1px solid #333;
+                    `;
 
                     if (startText && startText.trim().length > 0) {
-                        const styledStart = `<div style="text-align: center; font-weight: bold; margin-bottom: 20px; color: #888; border-bottom: 1px solid #333; padding-bottom: 10px;">${startText}</div>`;
+                        const styledStart = `<div style="${styleCSS} border-bottom: 1px solid #333;">${startText}</div>`;
                         // Prepend
                         content = `${styledStart}\n\n${content}`;
                     }
 
                     if (endText && endText.trim().length > 0) {
-                        const styledEnd = `<div style="text-align: center; font-weight: bold; margin-top: 20px; color: #888; border-top: 1px solid #333; padding-top: 10px;">${endText}</div>`;
+                        const styledEnd = `<div style="${styleCSS} border-top: 1px solid #333;">${endText}</div>`;
                         // Append
                         content = `${content}\n\n${styledEnd}`;
                     }
