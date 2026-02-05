@@ -736,7 +736,14 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. 🔥 Copyright Logic (Separated)
+                    // 3. 🔥🔥 RESTORED INTERNAL SEPARATOR 🔥🔥
+                    // Detect "Chapter X:..." or "الفصل X:..." and add the line UNDER it inside the text
+                    const titleRegex = /(^|\n)((?:الفصل|Chapter)\s+\d+.*)/i;
+                    if (titleRegex.test(content)) {
+                        content = content.replace(titleRegex, '$1$2\n\n___________________________________________________________________________________\n\n');
+                    }
+
+                    // 4. Copyright Logic (Separated)
                     const frequency = adminSettings.copyrightFrequency || 'always';
                     const everyX = adminSettings.copyrightEveryX || 5;
                     const chapNum = parseInt(chapterMeta.number);
