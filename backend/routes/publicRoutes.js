@@ -737,10 +737,10 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
                     // 3. 🔥🔥 RESTORED INTERNAL SEPARATOR 🔥🔥
-                    // Detect "Chapter X:..." or "الفصل X:..." and add the line UNDER it inside the text
+                    // Detect "Chapter X:..." or "الفصل X:..." and add the HTML divider instead of text lines
                     const titleRegex = /(^|\n)((?:الفصل|Chapter)\s+\d+.*)/i;
                     if (titleRegex.test(content)) {
-                        content = content.replace(titleRegex, '$1$2\n\n___________________________________________________________________________________\n\n');
+                        content = content.replace(titleRegex, '$1$2\n\n<div class="chapter-divider"></div>\n\n');
                     }
 
                     // 4. Copyright Logic (Separated)
@@ -759,6 +759,8 @@ module.exports = function(app, verifyToken, upload) {
                         copyrightStart = adminSettings.globalChapterStartText || "";
                         copyrightEnd = adminSettings.globalChapterEndText || "";
                         copyrightStyles = adminSettings.globalCopyrightStyles || {};
+                        // Ensure font size is sent if missing
+                        if (!copyrightStyles.fontSize) copyrightStyles.fontSize = 14; 
                     }
                 }
             } catch (cleanerErr) {}
