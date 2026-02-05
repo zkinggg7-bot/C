@@ -33,7 +33,12 @@ const settingsSchema = new mongoose.Schema({
     }],
 
     fontSize: { type: Number, default: 18 },
-    globalBlocklist: [{ type: String }] 
+    globalBlocklist: [{ type: String }],
+
+    // 🔥 Global App Rights (Copyrights)
+    globalChapterStartText: { type: String, default: '' },
+    globalChapterEndText: { type: String, default: '' }
+
 }, { timestamps: true });
 
 const Settings = mongoose.model('Settings', settingsSchema);
