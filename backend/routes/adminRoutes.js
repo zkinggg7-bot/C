@@ -257,6 +257,44 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
+    // =========================================================
+    // 📝 GLOBAL COPYRIGHTS API
+    // =========================================================
+    
+    // Get Copyrights
+    app.get('/api/admin/copyright', verifyAdmin, async (req, res) => {
+        try {
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) {
+                settings = new Settings({ user: req.user.id });
+                await settings.save();
+            }
+            res.json({
+                startText: settings.globalChapterStartText || '',
+                endText: settings.globalChapterEndText || ''
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Save Copyrights
+    app.post('/api/admin/copyright', verifyAdmin, async (req, res) => {
+        try {
+            const { startText, endText } = req.body;
+            let settings = await Settings.findOne({ user: req.user.id });
+            if (!settings) {
+                settings = new Settings({ user: req.user.id });
+            }
+            settings.globalChapterStartText = startText;
+            settings.globalChapterEndText = endText;
+            await settings.save();
+            res.json({ message: "Copyrights updated" });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
 
     // =========================================================
     // 📜 SCRAPER LOGS API
