@@ -45,7 +45,11 @@ const settingsSchema = new mongoose.Schema({
         alignment: { type: String, enum: ['left', 'center', 'right'], default: 'center' },
         isBold: { type: Boolean, default: true },
         fontSize: { type: Number, default: 14 }
-    }
+    },
+
+    // 🔥 Frequency Control for Copyrights
+    copyrightFrequency: { type: String, enum: ['always', 'random', 'every_x'], default: 'always' },
+    copyrightEveryX: { type: Number, default: 5 } // Used if frequency is 'every_x'
 
 }, { timestamps: true });
 
