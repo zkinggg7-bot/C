@@ -35,9 +35,17 @@ const settingsSchema = new mongoose.Schema({
     fontSize: { type: Number, default: 18 },
     globalBlocklist: [{ type: String }],
 
-    // 🔥 Global App Rights (Copyrights)
+    // 🔥 Global App Rights (Copyrights) with Styling
     globalChapterStartText: { type: String, default: '' },
-    globalChapterEndText: { type: String, default: '' }
+    globalChapterEndText: { type: String, default: '' },
+    
+    globalCopyrightStyles: {
+        color: { type: String, default: '#888888' },
+        opacity: { type: Number, default: 1 },
+        alignment: { type: String, enum: ['left', 'center', 'right'], default: 'center' },
+        isBold: { type: Boolean, default: true },
+        fontSize: { type: Number, default: 14 }
+    }
 
 }, { timestamps: true });
 
