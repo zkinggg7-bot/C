@@ -271,7 +271,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             }
             res.json({
                 startText: settings.globalChapterStartText || '',
-                endText: settings.globalChapterEndText || ''
+                endText: settings.globalChapterEndText || '',
+                styles: settings.globalCopyrightStyles || {}
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -281,13 +282,18 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Save Copyrights
     app.post('/api/admin/copyright', verifyAdmin, async (req, res) => {
         try {
-            const { startText, endText } = req.body;
+            const { startText, endText, styles } = req.body;
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) {
                 settings = new Settings({ user: req.user.id });
             }
             settings.globalChapterStartText = startText;
             settings.globalChapterEndText = endText;
+            
+            if (styles) {
+                settings.globalCopyrightStyles = styles;
+            }
+
             await settings.save();
             res.json({ message: "Copyrights updated" });
         } catch (e) {
