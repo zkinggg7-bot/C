@@ -705,13 +705,12 @@ module.exports = function(app, verifyToken, upload) {
             // 🔥 CLEANER + COPYRIGHTS + SEPARATOR INJECTION 🔥
             try {
                 // Fetch settings for both Blocklist AND Global Copyrights
-                // We assume there's a master settings doc (either created by main admin or first one found)
                 const adminSettings = await Settings.findOne({ 
                     $or: [
                         { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
                         { globalChapterStartText: { $exists: true } }
                     ] 
-                }).sort({ updatedAt: -1 }).lean(); // Get the latest updated one
+                }).sort({ updatedAt: -1 }).lean(); 
 
                 if (adminSettings) {
                     // 1. Cleaner Logic
@@ -734,40 +733,62 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
                     // 3. 🔥 Inject Separator Line after "Chapter X: Title" or "الفصل X: Title"
-                    // Looks for start of string or newline, followed by Chapter/الفصل pattern, till end of line.
                     const titleRegex = /(^|\n)((?:الفصل|Chapter)\s+[^:\n]+:[^\n]+)/i;
                     if (titleRegex.test(content)) {
-                        // Append the separator literally as requested
-                        content = content.replace(titleRegex, '$1$2\n\n___________________________________________________________________________________\n\n');
+                        // Append the separator literally as requested in a container
+                        content = content.replace(titleRegex, '$1$2\n\n<div class="separator-line">___________________________________________________________________________________</div>\n\n');
                     }
 
-                    // 4. Inject Copyrights (Styled)
-                    const startText = adminSettings.globalChapterStartText;
-                    const endText = adminSettings.globalChapterEndText;
-                    const style = adminSettings.globalCopyrightStyles || {};
+                    // 4. Inject Copyrights (Styled & Separated)
+                    
+                    // --- Frequency Check Logic ---
+                    let showCopyright = true;
+                    const frequency = adminSettings.copyrightFrequency || 'always';
+                    const everyX = adminSettings.copyrightEveryX || 5;
+                    const chapNum = parseInt(chapterMeta.number);
 
-                    // Build CSS string
-                    const styleCSS = `
-                        color: ${style.color || '#888'}; 
-                        opacity: ${style.opacity || 1}; 
-                        text-align: ${style.alignment || 'center'}; 
-                        font-weight: ${style.isBold ? 'bold' : 'normal'};
-                        font-size: ${style.fontSize || 14}px;
-                        margin: 20px 0;
-                        padding: 10px 0;
-                        border-${startText ? 'bottom' : 'top'}: 1px solid #333;
-                    `;
-
-                    if (startText && startText.trim().length > 0) {
-                        const styledStart = `<div style="${styleCSS} border-bottom: 1px solid #333;">${startText}</div>`;
-                        // Prepend
-                        content = `${styledStart}\n\n${content}`;
+                    if (frequency === 'random') {
+                        if (Math.random() > 0.5) showCopyright = false;
+                    } else if (frequency === 'every_x') {
+                        if (chapNum % everyX !== 0) showCopyright = false;
                     }
 
-                    if (endText && endText.trim().length > 0) {
-                        const styledEnd = `<div style="${styleCSS} border-top: 1px solid #333;">${endText}</div>`;
-                        // Append
-                        content = `${content}\n\n${styledEnd}`;
+                    if (showCopyright) {
+                        const startText = adminSettings.globalChapterStartText;
+                        const endText = adminSettings.globalChapterEndText;
+                        const style = adminSettings.globalCopyrightStyles || {};
+
+                        // Build CSS string for the text only
+                        const styleCSS = `
+                            color: ${style.color || '#888'}; 
+                            opacity: ${style.opacity || 1}; 
+                            text-align: ${style.alignment || 'center'}; 
+                            font-weight: ${style.isBold ? 'bold' : 'normal'};
+                            font-size: ${style.fontSize || 14}px;
+                            margin: 10px 0;
+                            padding: 5px 0;
+                        `;
+
+                        // The separator line is independent and static
+                        const separatorHtml = `<div class="separator-line" style="text-align: center; color: #333; margin: 10px 0; opacity: 0.5;">___________________________________________________________________________________</div>`;
+
+                        if (startText && startText.trim().length > 0) {
+                            const styledStart = `
+                                <div class="copyright-container start" style="${styleCSS}">${startText}</div>
+                                ${separatorHtml}
+                            `;
+                            // Prepend
+                            content = `${styledStart}\n\n${content}`;
+                        }
+
+                        if (endText && endText.trim().length > 0) {
+                            const styledEnd = `
+                                ${separatorHtml}
+                                <div class="copyright-container end" style="${styleCSS}">${endText}</div>
+                            `;
+                            // Append
+                            content = `${content}\n\n${styledEnd}`;
+                        }
                     }
                 }
             } catch (cleanerErr) {}
