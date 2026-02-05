@@ -702,22 +702,52 @@ module.exports = function(app, verifyToken, upload) {
                 }
             }
 
+            // 🔥 CLEANER + COPYRIGHTS INJECTION 🔥
             try {
-                const adminSettings = await Settings.findOne({ globalBlocklist: { $exists: true, $not: { $size: 0 } } }).lean();
-                if (adminSettings && adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
-                    const blocklist = adminSettings.globalBlocklist;
-                    blocklist.forEach(word => {
-                        if (!word) return;
-                        if (word.includes('\n') || word.includes('\r')) {
-                            content = content.split(word).join('');
-                        } else {
-                            const escapedKeyword = escapeRegExp(word);
-                            const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
-                            content = content.replace(regex, '');
-                        }
-                    });
+                // Fetch settings for both Blocklist AND Global Copyrights
+                // We assume there's a master settings doc (either created by main admin or first one found)
+                const adminSettings = await Settings.findOne({ 
+                    $or: [
+                        { globalBlocklist: { $exists: true, $not: { $size: 0 } } },
+                        { globalChapterStartText: { $exists: true } }
+                    ] 
+                }).sort({ updatedAt: -1 }).lean(); // Get the latest updated one
+
+                if (adminSettings) {
+                    // 1. Cleaner Logic
+                    if (adminSettings.globalBlocklist && adminSettings.globalBlocklist.length > 0) {
+                        const blocklist = adminSettings.globalBlocklist;
+                        blocklist.forEach(word => {
+                            if (!word) return;
+                            if (word.includes('\n') || word.includes('\r')) {
+                                content = content.split(word).join('');
+                            } else {
+                                const escapedKeyword = escapeRegExp(word);
+                                const regex = new RegExp(`^.*${escapedKeyword}.*$`, 'gm');
+                                content = content.replace(regex, '');
+                            }
+                        });
+                    }
+
+                    // 2. Formatting cleanup
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
+
+                    // 3. Inject Copyrights (If they exist)
+                    const startText = adminSettings.globalChapterStartText;
+                    const endText = adminSettings.globalChapterEndText;
+
+                    if (startText && startText.trim().length > 0) {
+                        const styledStart = `<div style="text-align: center; font-weight: bold; margin-bottom: 20px; color: #888; border-bottom: 1px solid #333; padding-bottom: 10px;">${startText}</div>`;
+                        // Prepend
+                        content = `${styledStart}\n\n${content}`;
+                    }
+
+                    if (endText && endText.trim().length > 0) {
+                        const styledEnd = `<div style="text-align: center; font-weight: bold; margin-top: 20px; color: #888; border-top: 1px solid #333; padding-top: 10px;">${endText}</div>`;
+                        // Append
+                        content = `${content}\n\n${styledEnd}`;
+                    }
                 }
             } catch (cleanerErr) {}
 
