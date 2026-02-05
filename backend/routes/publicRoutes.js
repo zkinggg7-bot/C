@@ -702,7 +702,11 @@ module.exports = function(app, verifyToken, upload) {
                 }
             }
 
-            // 🔥 CLEANER + COPYRIGHTS + SEPARATOR INJECTION 🔥
+            // 🔥 CLEANER + SEPARATION LOGIC 🔥
+            let copyrightStart = "";
+            let copyrightEnd = "";
+            let copyrightStyles = {};
+
             try {
                 // Fetch settings for both Blocklist AND Global Copyrights
                 const adminSettings = await Settings.findOne({ 
@@ -732,20 +736,11 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. 🔥 Inject Separator Line after "Chapter X: Title" or "الفصل X: Title"
-                    const titleRegex = /(^|\n)((?:الفصل|Chapter)\s+[^:\n]+:[^\n]+)/i;
-                    if (titleRegex.test(content)) {
-                        // Append the separator literally as requested in a container
-                        content = content.replace(titleRegex, '$1$2\n\n<div class="separator-line">___________________________________________________________________________________</div>\n\n');
-                    }
-
-                    // 4. Inject Copyrights (Styled & Separated)
-                    
-                    // --- Frequency Check Logic ---
-                    let showCopyright = true;
+                    // 3. 🔥 Copyright Logic (Separated)
                     const frequency = adminSettings.copyrightFrequency || 'always';
                     const everyX = adminSettings.copyrightEveryX || 5;
                     const chapNum = parseInt(chapterMeta.number);
+                    let showCopyright = true;
 
                     if (frequency === 'random') {
                         if (Math.random() > 0.5) showCopyright = false;
@@ -754,41 +749,9 @@ module.exports = function(app, verifyToken, upload) {
                     }
 
                     if (showCopyright) {
-                        const startText = adminSettings.globalChapterStartText;
-                        const endText = adminSettings.globalChapterEndText;
-                        const style = adminSettings.globalCopyrightStyles || {};
-
-                        // Build CSS string for the text only
-                        const styleCSS = `
-                            color: ${style.color || '#888'}; 
-                            opacity: ${style.opacity || 1}; 
-                            text-align: ${style.alignment || 'center'}; 
-                            font-weight: ${style.isBold ? 'bold' : 'normal'};
-                            font-size: ${style.fontSize || 14}px;
-                            margin: 10px 0;
-                            padding: 5px 0;
-                        `;
-
-                        // The separator line is independent and static
-                        const separatorHtml = `<div class="separator-line" style="text-align: center; color: #333; margin: 10px 0; opacity: 0.5;">___________________________________________________________________________________</div>`;
-
-                        if (startText && startText.trim().length > 0) {
-                            const styledStart = `
-                                <div class="copyright-container start" style="${styleCSS}">${startText}</div>
-                                ${separatorHtml}
-                            `;
-                            // Prepend
-                            content = `${styledStart}\n\n${content}`;
-                        }
-
-                        if (endText && endText.trim().length > 0) {
-                            const styledEnd = `
-                                ${separatorHtml}
-                                <div class="copyright-container end" style="${styleCSS}">${endText}</div>
-                            `;
-                            // Append
-                            content = `${content}\n\n${styledEnd}`;
-                        }
+                        copyrightStart = adminSettings.globalChapterStartText || "";
+                        copyrightEnd = adminSettings.globalChapterEndText || "";
+                        copyrightStyles = adminSettings.globalCopyrightStyles || {};
                     }
                 }
             } catch (cleanerErr) {}
@@ -798,9 +761,13 @@ module.exports = function(app, verifyToken, upload) {
                 totalAvailable = novel.chapters.filter(c => !isChapterHidden(c.title)).length;
             }
 
+            // 🔥 SEND SEPARATE FIELDS, DO NOT MERGE INTO CONTENT 🔥
             res.json({ 
                 ...chapterMeta, 
-                content: content,
+                content: content, // Pure content
+                copyrightStart, // Separate Data
+                copyrightEnd,   // Separate Data
+                copyrightStyles, // Separate Style
                 totalChapters: totalAvailable
             });
         } catch (error) {
