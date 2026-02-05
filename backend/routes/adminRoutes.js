@@ -272,7 +272,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             res.json({
                 startText: settings.globalChapterStartText || '',
                 endText: settings.globalChapterEndText || '',
-                styles: settings.globalCopyrightStyles || {}
+                styles: settings.globalCopyrightStyles || {},
+                frequency: settings.copyrightFrequency || 'always',
+                everyX: settings.copyrightEveryX || 5
             });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -282,7 +284,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // Save Copyrights
     app.post('/api/admin/copyright', verifyAdmin, async (req, res) => {
         try {
-            const { startText, endText, styles } = req.body;
+            const { startText, endText, styles, frequency, everyX } = req.body;
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) {
                 settings = new Settings({ user: req.user.id });
@@ -290,9 +292,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             settings.globalChapterStartText = startText;
             settings.globalChapterEndText = endText;
             
-            if (styles) {
-                settings.globalCopyrightStyles = styles;
-            }
+            if (styles) settings.globalCopyrightStyles = styles;
+            if (frequency) settings.copyrightFrequency = frequency;
+            if (everyX) settings.copyrightEveryX = everyX;
 
             await settings.save();
             res.json({ message: "Copyrights updated" });
