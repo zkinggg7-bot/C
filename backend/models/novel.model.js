@@ -16,9 +16,14 @@ const novelSchema = new mongoose.Schema({
     cover: { type: String }, 
     description: { type: String },
     category: { type: String, index: true },
-    tags: [{ type: String, index: true }], // 🔥 Added index to tags
-    status: { type: String, default: 'مستمرة' },
+    tags: [{ type: String, index: true }], 
+    status: { type: String, default: 'مستمرة' }, // Internal Status
     rating: { type: Number, default: 0 },
+    
+    // 🔥 Watchlist & Scraper Fields
+    sourceUrl: { type: String }, // رابط المصدر الأصلي
+    sourceStatus: { type: String }, // الحالة في المصدر (Ongoing/Completed)
+    isWatched: { type: Boolean, default: false }, // هل هي في قائمة المراقبة اليومية؟
     
     views: { type: Number, default: 0 }, 
     viewedBy: [{ type: String }], 
@@ -48,6 +53,7 @@ novelSchema.index({ title: 'text', author: 'text' });
 novelSchema.index({ views: -1 });
 novelSchema.index({ lastChapterUpdate: -1 });
 novelSchema.index({ authorEmail: 1 }); 
+novelSchema.index({ isWatched: 1 }); // فهرس للبحث السريع عن الروايات المراقبة
 
 const Novel = mongoose.model('Novel', novelSchema);
 module.exports = Novel;
