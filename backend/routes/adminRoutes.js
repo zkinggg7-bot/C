@@ -491,7 +491,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     // 🔥 Watchlist Fields
                     sourceUrl: novelData.sourceUrl || '',
                     sourceStatus: novelData.status || 'مستمرة',
-                    isWatched: true // Auto-watch new scraped novels
+                    isWatched: true, // Auto-watch new scraped novels
+                    lastChapterUpdate: novelData.lastUpdate ? new Date(novelData.lastUpdate) : new Date() // Use Source Date
                 });
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
@@ -511,6 +512,16 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     }
                 }
                 
+                // 🔥 Update Last Update Date based on SOURCE
+                if (novelData.lastUpdate) {
+                    const sourceDate = new Date(novelData.lastUpdate);
+                    if (!isNaN(sourceDate.getTime())) {
+                        novel.lastChapterUpdate = sourceDate;
+                        // Log update if it's vastly different
+                        await logScraper(`📅 تم تحديث تاريخ آخر فصل من المصدر`, 'info');
+                    }
+                }
+
                 // Ensure it's in watchlist
                 novel.isWatched = true; 
 
@@ -548,7 +559,12 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                 if (addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
-                    novel.lastChapterUpdate = new Date();
+                    
+                    // If we added chapters, update the date ONLY if source date is NOT provided (fallback)
+                    if (!novelData.lastUpdate) {
+                        novel.lastChapterUpdate = new Date();
+                    }
+
                     // Reactivate if new chapters added and not completed
                     if (novel.status === 'متوقفة' && novel.sourceStatus !== 'مكتملة') {
                         novel.status = 'مستمرة';
