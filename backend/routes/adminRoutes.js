@@ -370,6 +370,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
                 
                 let computedStatus = 'ongoing';
+                
+                // Priority to server-side logic
                 if (n.sourceStatus === 'مكتملة' || n.status === 'مكتملة') {
                     computedStatus = 'completed';
                 } else if (diffDays > 90) {
@@ -426,7 +428,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🕷️ SCRAPER WEBHOOK (Enhanced for Watchlist)
+    // 🕷️ SCRAPER WEBHOOK (Corrected - No Overwrite)
     // =========================================================
     app.post('/api/scraper/receive', async (req, res) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -457,23 +459,23 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 ]
             });
 
-            // Image Upload Logic (Cloudinary)
-            if (!skipMetadataUpdate && novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
-                try {
-                    const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
-                        folder: 'novels_covers',
-                        resource_type: 'auto',
-                        timeout: 60000 
-                    });
-                    novelData.cover = uploadRes.secure_url;
-                    await logScraper(`✅ تم رفع الغلاف`, 'success');
-                } catch (imgErr) {
-                    await logScraper(`⚠️ فشل رفع الغلاف (سيستخدم الرابط الأصلي)`, 'warning');
-                }
-            }
-
             if (!novel) {
-                // New Novel
+                // Image Upload Logic (Cloudinary) - Only for NEW novels
+                if (novelData.cover && !novelData.cover.includes('cloudinary') && cloudinary) {
+                    try {
+                        const uploadRes = await cloudinary.uploader.upload(novelData.cover, {
+                            folder: 'novels_covers',
+                            resource_type: 'auto',
+                            timeout: 60000 
+                        });
+                        novelData.cover = uploadRes.secure_url;
+                        await logScraper(`✅ تم رفع الغلاف`, 'success');
+                    } catch (imgErr) {
+                        await logScraper(`⚠️ فشل رفع الغلاف (سيستخدم الرابط الأصلي)`, 'warning');
+                    }
+                }
+
+                // New Novel - Full Creation
                 novel = new Novel({
                     title: novelData.title,
                     titleEn: novelData.title, 
@@ -494,31 +496,31 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
             } else {
-                // Update Metadata if allowed OR update Watchlist info always
+                // 🔥🔥 CRITICAL: EXISTING NOVEL - UPDATE ONLY WATCHLIST & STATUS 🔥🔥
                 
-                // Always update watchlist status info
+                // Update Source URL if provided
                 if (novelData.sourceUrl) novel.sourceUrl = novelData.sourceUrl;
+                
+                // Update Source Status
                 if (novelData.status) {
                     novel.sourceStatus = novelData.status;
-                    // Also update main status if completed
-                    if (novelData.status === 'مكتملة') novel.status = 'مكتملة';
+                    // Also update main status ONLY if completed
+                    if (novelData.status === 'مكتملة') {
+                        novel.status = 'مكتملة';
+                        await logScraper(`🏁 تم تحديث الحالة إلى مكتملة`, 'success');
+                    }
                 }
-                novel.isWatched = true; // Ensure it's watched
+                
+                // Ensure it's in watchlist
+                novel.isWatched = true; 
 
-                if (!skipMetadataUpdate) {
-                    if (novelData.cover && (novelData.cover.includes('cloudinary') || !novel.cover)) {
-                         novel.cover = novelData.cover;
-                    }
-                    if (!novel.description && novelData.description) novel.description = novelData.description;
-                    if (!novel.authorEmail) {
-                        novel.author = user.name;
-                        novel.authorEmail = user.email;
-                    }
-                }
+                // 🛑 DO NOT UPDATE COVER, DESCRIPTION, TITLE, OR AUTHOR
+                // We deliberately skip any other metadata updates here.
+                
                 await novel.save();
             }
 
-            // Save Chapters
+            // Save Chapters (This logic handles duplicates internally)
             if (chapters && Array.isArray(chapters) && chapters.length > 0) {
                 let addedCount = 0;
                 for (const chap of chapters) {
