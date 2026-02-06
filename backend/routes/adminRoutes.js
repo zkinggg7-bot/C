@@ -335,7 +335,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 if (user) await logScraper(`👤 المستخدم: ${user.name}`, 'info');
             }
 
-            await logScraper(`🚀 بدء عملية الفحص الذكي (Probe Mode)...`, 'info');
+            await logScraper(`🚀 بدء عملية الفحص الذكي...`, 'info');
             await logScraper(`🔗 الرابط: ${url}`, 'info');
             res.json({ success: true });
         } catch (e) {
@@ -348,6 +348,46 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const { message, type } = req.body;
             await logScraper(message, type || 'info');
             res.json({ success: true });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // =========================================================
+    // 👁️ NEW WATCHLIST API (Watchlist Dashboard)
+    // =========================================================
+    
+    // Get all watched novels with status calculation
+    app.get('/api/admin/watchlist', verifyAdmin, async (req, res) => {
+        try {
+            const novels = await Novel.find({ isWatched: true })
+                .select('title cover chapters lastChapterUpdate sourceUrl sourceStatus status')
+                .sort({ lastChapterUpdate: -1 });
+
+            const formatted = novels.map(n => {
+                const now = new Date();
+                const diffTime = Math.abs(now - n.lastChapterUpdate);
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                
+                let computedStatus = 'ongoing';
+                if (n.sourceStatus === 'مكتملة' || n.status === 'مكتملة') {
+                    computedStatus = 'completed';
+                } else if (diffDays > 90) {
+                    computedStatus = 'stopped';
+                }
+
+                return {
+                    _id: n._id,
+                    title: n.title,
+                    cover: n.cover,
+                    chaptersCount: n.chapters ? n.chapters.length : 0,
+                    lastUpdate: n.lastChapterUpdate,
+                    sourceUrl: n.sourceUrl,
+                    status: computedStatus // 'ongoing', 'completed', 'stopped'
+                };
+            });
+
+            res.json(formatted);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -386,7 +426,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🕷️ SCRAPER WEBHOOK
+    // 🕷️ SCRAPER WEBHOOK (Enhanced for Watchlist)
     // =========================================================
     app.post('/api/scraper/receive', async (req, res) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -409,7 +449,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
             const user = await User.findOne({ email: adminEmail });
             if (!user) return res.status(404).json({ message: "User not found" });
 
-            // 🔥 تعديل: البحث باستخدام العنوانين لتجنب التكرار
+            // 🔥 البحث باستخدام العنوانين لتجنب التكرار
             let novel = await Novel.findOne({ 
                 $or: [
                     { title: novelData.title },
@@ -436,21 +476,35 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 // New Novel
                 novel = new Novel({
                     title: novelData.title,
-                    titleEn: novelData.title, // Default titleEn to same title if new
+                    titleEn: novelData.title, 
                     cover: novelData.cover,
                     description: novelData.description,
                     author: user.name, 
                     authorEmail: user.email,
                     category: novelData.category || 'أخرى',
                     tags: novelData.tags || [],
-                    status: 'مستمرة',
+                    status: novelData.status || 'مستمرة', // Default from scraper
                     chapters: [],
-                    views: 0
+                    views: 0,
+                    // 🔥 Watchlist Fields
+                    sourceUrl: novelData.sourceUrl || '',
+                    sourceStatus: novelData.status || 'مستمرة',
+                    isWatched: true // Auto-watch new scraped novels
                 });
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
             } else {
-                // Update Metadata if allowed
+                // Update Metadata if allowed OR update Watchlist info always
+                
+                // Always update watchlist status info
+                if (novelData.sourceUrl) novel.sourceUrl = novelData.sourceUrl;
+                if (novelData.status) {
+                    novel.sourceStatus = novelData.status;
+                    // Also update main status if completed
+                    if (novelData.status === 'مكتملة') novel.status = 'مكتملة';
+                }
+                novel.isWatched = true; // Ensure it's watched
+
                 if (!skipMetadataUpdate) {
                     if (novelData.cover && (novelData.cover.includes('cloudinary') || !novel.cover)) {
                          novel.cover = novelData.cover;
@@ -460,8 +514,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                         novel.author = user.name;
                         novel.authorEmail = user.email;
                     }
-                    await novel.save();
                 }
+                await novel.save();
             }
 
             // Save Chapters
@@ -493,6 +547,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 if (addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
                     novel.lastChapterUpdate = new Date();
+                    // Reactivate if new chapters added and not completed
+                    if (novel.status === 'متوقفة' && novel.sourceStatus !== 'مكتملة') {
+                        novel.status = 'مستمرة';
+                    }
                     await novel.save();
                     await logScraper(`✅ تم حفظ ${addedCount} فصل جديد`, 'success');
                 }
