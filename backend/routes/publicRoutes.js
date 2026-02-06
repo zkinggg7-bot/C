@@ -736,11 +736,15 @@ module.exports = function(app, verifyToken, upload) {
                     content = content.replace(/^\s*[\r\n]/gm, ''); 
                     content = content.replace(/\n\s*\n/g, '\n\n'); 
 
-                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (FIXED) 🔥🔥
-                    // Regex to find ANY line containing "الفصل" or "Chapter" and add the divider under it
-                    // Matches the whole line if it contains the keywords
+                    // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (TEXT BASED) 🔥🔥
+                    // Inject explicit text underscores instead of HTML divider div
+                    // This allows the line to be copied/downloaded as text.
+                    const separatorLine = "\n\n___________________________________________________________________\n\n";
                     const internalTitleRegex = /(^|\n)(.*(?:الفصل|Chapter).*?)(\n|$)/gi;
-                    content = content.replace(internalTitleRegex, '$1$2\n<div class="chapter-divider"></div>\n$3');
+                    
+                    if (internalTitleRegex.test(content)) {
+                        content = content.replace(internalTitleRegex, '$1$2' + separatorLine + '$3');
+                    }
 
                     // 4. Copyright Logic (Separated)
                     const frequency = adminSettings.copyrightFrequency || 'always';
