@@ -739,7 +739,7 @@ module.exports = function(app, verifyToken, upload) {
                     // 3. 🔥🔥 INTERNAL CHAPTER SEPARATOR (TEXT BASED) 🔥🔥
                     // Inject explicit text underscores instead of HTML divider div
                     // This allows the line to be copied/downloaded as text.
-                    const separatorLine = "\n\n___________________________________________________________________\n\n";
+                    const separatorLine = "\n\n_________________________________\n\n";
                     const internalTitleRegex = /(^|\n)(.*(?:الفصل|Chapter).*?)(\n|$)/gi;
                     
                     if (internalTitleRegex.test(content)) {
