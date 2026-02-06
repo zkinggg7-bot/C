@@ -357,8 +357,19 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // 👁️ NEW WATCHLIST API (Watchlist Dashboard)
     // =========================================================
     
-    // Get all watched novels with status calculation
-    app.get('/api/admin/watchlist', verifyAdmin, async (req, res) => {
+    // 🔥🔥 UPDATED: Allow Access with API Secret Header for Scraper 🔥🔥
+    app.get('/api/admin/watchlist', async (req, res, next) => {
+        const secret = req.headers['authorization'] || req.headers['x-api-secret'];
+        // This should theoretically be in env, but keeping consistent with prompt
+        const VALID_SECRET = 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
+        
+        if (secret === VALID_SECRET) {
+            // Bypass verification, it's the scraper
+            return next();
+        }
+        // Otherwise, verify admin token
+        verifyAdmin(req, res, next);
+    }, async (req, res) => {
         try {
             const novels = await Novel.find({ isWatched: true })
                 .select('title cover chapters lastChapterUpdate sourceUrl sourceStatus status')
@@ -444,12 +455,18 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(400).json({ message: error });
             }
 
-            if (!adminEmail || !novelData || !novelData.title) {
+            if (!novelData || !novelData.title) {
                 return res.status(400).json({ message: "Missing data" });
             }
 
-            const user = await User.findOne({ email: adminEmail });
-            if (!user) return res.status(404).json({ message: "User not found" });
+            // Fallback for user if automated
+            let user = null;
+            if (adminEmail) {
+                user = await User.findOne({ email: adminEmail });
+            }
+            // Use System Name if no user found
+            const authorName = user ? user.name : "System Scraper";
+            const authorEmail = user ? user.email : "system@scraper";
 
             // 🔥 البحث باستخدام العنوانين لتجنب التكرار
             let novel = await Novel.findOne({ 
@@ -481,8 +498,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     titleEn: novelData.title, 
                     cover: novelData.cover,
                     description: novelData.description,
-                    author: user.name, 
-                    authorEmail: user.email,
+                    author: authorName, 
+                    authorEmail: authorEmail,
                     category: novelData.category || 'أخرى',
                     tags: novelData.tags || [],
                     status: novelData.status || 'مستمرة', // Default from scraper
@@ -671,7 +688,11 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Users Management (Kept same)
+    // ... (Keep existing User/Novel/Chapter management routes as they are) ...
+    // Note: I am not deleting the rest of the file, just showing the modified part and assuming the rest is appended in the real file or maintained. 
+    // To satisfy "Write Full Code", I will include the rest of standard CRUD routes below.
+
+    // Users Management
     app.get('/api/admin/users', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
@@ -744,13 +765,13 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Novels Management (Updated to support titleEn)
+    // Novels Management
     app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
         try {
             const { title, titleEn, cover, description, category, tags, status } = req.body;
             const newNovel = new Novel({
                 title, 
-                titleEn: titleEn || '', // Optional English Title
+                titleEn: titleEn || '', 
                 cover, 
                 description, 
                 author: req.user.name, authorEmail: req.user.email,
@@ -902,7 +923,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // 🔥🔥 BATCH DELETE CHAPTERS API 🔥🔥
     app.post('/api/admin/chapters/batch-delete', verifyAdmin, async (req, res) => {
         try {
             const { novelId, chapterNumbers } = req.body;
@@ -918,11 +938,9 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(403).json({ message: "Access Denied" });
             }
 
-            // 1. Remove from MongoDB metadata
             novel.chapters = novel.chapters.filter(c => !chapterNumbers.includes(c.number));
             await novel.save();
 
-            // 2. Remove from Firestore content
             if (firestore) {
                 const batch = firestore.batch();
                 chapterNumbers.forEach(num => {
