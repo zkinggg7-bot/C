@@ -20,10 +20,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- THE TRANSLATION WORKER (STRICT FIRESTORE MODE) ---
 async function processTranslationJob(jobId) {
-    // ... (This function remains unchanged to protect core logic)
-    // Abbreviated for this response as the user only asked for endpoint optimization
-    // Assuming full worker logic exists here as in previous files.
-    // ...
     try {
         const job = await TranslationJob.findById(jobId);
         if (!job || job.status !== 'active') return;
@@ -196,7 +192,7 @@ ${translatedText.substring(0, 8000)}
                 const updates = { 
                     $set: { 
                         "chapters.$.title": `الفصل ${chapterNum}`,
-                        "lastChapterUpdate": new Date() 
+                        "lastChapterUpdate": new Date() // 🔥 TRIGGER UPDATE VISIBILITY
                     } 
                 };
 
@@ -213,7 +209,7 @@ ${translatedText.substring(0, 8000)}
                 await TranslationJob.findByIdAndUpdate(jobId, {
                     $inc: { translatedCount: 1 },
                     $set: { currentChapter: chapterNum, lastUpdate: new Date() },
-                    $pull: { targetChapters: chapterNum } // 🔥 Remove processed chapter from queue
+                    $pull: { targetChapters: chapterNum } 
                 });
 
                 await pushLog(jobId, `🎉 تم إنجاز الفصل ${chapterNum} وحفظه في السيرفر`, 'success');
@@ -227,7 +223,13 @@ ${translatedText.substring(0, 8000)}
                             .collection('chapters').doc(chapterNum.toString())
                             .set({ content: translatedText }, { merge: true });
                         
-                        const updates = { $set: { "chapters.$.title": `الفصل ${chapterNum}` } };
+                        const updates = { 
+                            $set: { 
+                                "chapters.$.title": `الفصل ${chapterNum}`,
+                                "lastChapterUpdate": new Date() // 🔥 TRIGGER UPDATE VISIBILITY
+                            } 
+                        };
+                        
                         if (freshNovel.status === 'خاصة') updates.$set.status = 'مستمرة';
 
                         await Novel.findOneAndUpdate(
@@ -236,7 +238,7 @@ ${translatedText.substring(0, 8000)}
                         );
 
                         await TranslationJob.findByIdAndUpdate(jobId, {
-                            $pull: { targetChapters: chapterNum } // Remove even if extraction failed
+                            $pull: { targetChapters: chapterNum }
                         });
 
                         await pushLog(jobId, `⚠️ تم حفظ الترجمة (فشل الاستخراج): ${err.message}`, 'warning');
@@ -251,7 +253,6 @@ ${translatedText.substring(0, 8000)}
             await delay(2000); 
         }
 
-        // Final check
         const finalJob = await TranslationJob.findById(jobId);
         if (finalJob.status === 'active') {
             await TranslationJob.findByIdAndUpdate(jobId, { status: 'completed' });
@@ -270,7 +271,7 @@ async function pushLog(jobId, message, type) {
     });
 }
 
-
+// ... (Rest of routes unchanged) ...
 module.exports = function(app, verifyToken, verifyAdmin) {
 
     mongoose.connection.once('open', async () => {
@@ -394,16 +395,14 @@ module.exports = function(app, verifyToken, verifyAdmin) {
         }
     });
 
-    // 3. Get Jobs List (🔥 OPTIMIZED: Exclude logs and apiKeys)
+    // 3. Get Jobs List
     app.get('/api/translator/jobs', verifyToken, verifyAdmin, async (req, res) => {
         try {
-            // 🔥 Use .select() to exclude heavy fields. This is the fix for latency.
             const jobs = await TranslationJob.find()
                 .select('novelTitle cover status translatedCount totalToTranslate startTime') 
                 .sort({ updatedAt: -1 })
                 .limit(20);
             
-            // Map to lightweight UI objects
             const uiJobs = jobs.map(j => ({
                 id: j._id,
                 novelTitle: j.novelTitle,
@@ -450,11 +449,7 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.post('/api/translator/glossary', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { novelId, term, translation, category, description } = req.body; 
-            
-            // 🔥 Force category check
-            const finalCategory = category && ['characters', 'locations', 'items', 'ranks', 'other'].includes(category) 
-                                  ? category 
-                                  : 'other';
+            const finalCategory = category && ['characters', 'locations', 'items', 'ranks', 'other'].includes(category) ? category : 'other';
 
             const newTerm = await Glossary.findOneAndUpdate(
                 { novelId, term },
@@ -510,7 +505,6 @@ module.exports = function(app, verifyToken, verifyAdmin) {
     app.post('/api/translator/settings', verifyToken, verifyAdmin, async (req, res) => {
         try {
             const { customPrompt, translatorExtractPrompt, translatorModel, translatorApiKeys } = req.body;
-            
             let settings = await Settings.findOne({ user: req.user.id });
             if (!settings) {
                 settings = new Settings({ user: req.user.id });
