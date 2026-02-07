@@ -1,5 +1,4 @@
 
-
 // =================================================================
 // 1. التحميل اليدوي لمتغيرات البيئة
 // =================================================================
@@ -106,8 +105,11 @@ require('./routes/adminRoutes')(app, verifyToken, verifyAdmin, upload);
 // 🔥 تحميل مسارات المترجم الذكي
 require('./routes/translatorRoutes')(app, verifyToken, verifyAdmin);
 
-// تحميل المسارات العامة
+// تحميل المسارات العامة (Part 1: Novels, Categories)
 require('./routes/publicRoutes')(app, verifyToken, upload);
+
+// 🔥 تحميل مسارات تفاعل المستخدم (Part 2: Comments, Reactions, Library)
+require('./routes/userInteractionRoutes')(app, verifyToken, upload);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
