@@ -357,10 +357,8 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     // 👁️ NEW WATCHLIST API (Watchlist Dashboard)
     // =========================================================
     
-    // 🔥🔥 UPDATED: Allow Access with API Secret Header for Scraper 🔥🔥
     app.get('/api/admin/watchlist', async (req, res, next) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
-        // This should theoretically be in env, but keeping consistent with prompt
         const VALID_SECRET = 'Zeusndndjddnejdjdjdejekk29393838msmskxcm9239484jdndjdnddjj99292938338zeuslojdnejxxmejj82283849';
         
         if (secret === VALID_SECRET) {
@@ -382,7 +380,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 
                 let computedStatus = 'ongoing';
                 
-                // Priority to server-side logic
                 if (n.sourceStatus === 'مكتملة' || n.status === 'مكتملة') {
                     computedStatus = 'completed';
                 } else if (diffDays > 90) {
@@ -396,7 +393,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     chaptersCount: n.chapters ? n.chapters.length : 0,
                     lastUpdate: n.lastChapterUpdate,
                     sourceUrl: n.sourceUrl,
-                    status: computedStatus // 'ongoing', 'completed', 'stopped'
+                    status: computedStatus 
                 };
             });
 
@@ -418,7 +415,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         try {
             const { title } = req.body;
             
-            // 🔥 تعديل: البحث باستخدام العنوانين (العربي والانجليزي)
             const novel = await Novel.findOne({ 
                 $or: [
                     { title: title },
@@ -439,7 +435,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
     });
 
     // =========================================================
-    // 🕷️ SCRAPER WEBHOOK (Corrected - No Overwrite)
+    // 🕷️ SCRAPER WEBHOOK (Revised Logic)
     // =========================================================
     app.post('/api/scraper/receive', async (req, res) => {
         const secret = req.headers['authorization'] || req.headers['x-api-secret'];
@@ -448,7 +444,7 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         if (secret !== VALID_SECRET) return res.status(403).json({ message: "Unauthorized" });
 
         try {
-            const { adminEmail, novelData, chapters, error, skipMetadataUpdate } = req.body;
+            const { adminEmail, novelData, chapters, error } = req.body;
 
             if (error) {
                 await logScraper(`❌ توقف: ${error}`, 'error');
@@ -459,22 +455,24 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                 return res.status(400).json({ message: "Missing data" });
             }
 
-            // Fallback for user if automated
             let user = null;
             if (adminEmail) {
                 user = await User.findOne({ email: adminEmail });
             }
-            // Use System Name if no user found
             const authorName = user ? user.name : "System Scraper";
             const authorEmail = user ? user.email : "system@scraper";
 
-            // 🔥 البحث باستخدام العنوانين لتجنب التكرار
+            // 🔥 Search by title
             let novel = await Novel.findOne({ 
                 $or: [
                     { title: novelData.title },
                     { titleEn: novelData.title } 
                 ]
             });
+
+            // 🌟 Flag to check if we should update timestamp
+            let shouldUpdateTimestamp = false;
+            let addedCount = 0;
 
             if (!novel) {
                 // Image Upload Logic (Cloudinary) - Only for NEW novels
@@ -502,55 +500,37 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
                     authorEmail: authorEmail,
                     category: novelData.category || 'أخرى',
                     tags: novelData.tags || [],
-                    status: novelData.status || 'مستمرة', // Default from scraper
+                    status: novelData.status || 'مستمرة',
                     chapters: [],
                     views: 0,
-                    // 🔥 Watchlist Fields
                     sourceUrl: novelData.sourceUrl || '',
                     sourceStatus: novelData.status || 'مستمرة',
-                    isWatched: true, // Auto-watch new scraped novels
-                    lastChapterUpdate: novelData.lastUpdate ? new Date(novelData.lastUpdate) : new Date() // Use Source Date
+                    isWatched: true,
+                    // 🔥 Initial Date: Use Source Date or Now
+                    lastChapterUpdate: novelData.lastUpdate ? new Date(novelData.lastUpdate) : new Date() 
                 });
                 await novel.save();
                 await logScraper(`✨ تم إنشاء الرواية: ${novelData.title}`, 'info');
+                shouldUpdateTimestamp = true; // New novel = Update
             } else {
                 // 🔥🔥 CRITICAL: EXISTING NOVEL - UPDATE ONLY WATCHLIST & STATUS 🔥🔥
                 
-                // Update Source URL if provided
                 if (novelData.sourceUrl) novel.sourceUrl = novelData.sourceUrl;
                 
-                // Update Source Status
                 if (novelData.status) {
                     novel.sourceStatus = novelData.status;
-                    // Also update main status ONLY if completed
                     if (novelData.status === 'مكتملة') {
                         novel.status = 'مكتملة';
                         await logScraper(`🏁 تم تحديث الحالة إلى مكتملة`, 'success');
                     }
                 }
                 
-                // 🔥 Update Last Update Date based on SOURCE
-                if (novelData.lastUpdate) {
-                    const sourceDate = new Date(novelData.lastUpdate);
-                    if (!isNaN(sourceDate.getTime())) {
-                        novel.lastChapterUpdate = sourceDate;
-                        // Log update if it's vastly different
-                        await logScraper(`📅 تم تحديث تاريخ آخر فصل من المصدر`, 'info');
-                    }
-                }
-
                 // Ensure it's in watchlist
                 novel.isWatched = true; 
-
-                // 🛑 DO NOT UPDATE COVER, DESCRIPTION, TITLE, OR AUTHOR
-                // We deliberately skip any other metadata updates here.
-                
-                await novel.save();
             }
 
-            // Save Chapters (This logic handles duplicates internally)
+            // Save Chapters Logic
             if (chapters && Array.isArray(chapters) && chapters.length > 0) {
-                let addedCount = 0;
                 for (const chap of chapters) {
                     const existingChap = novel.chapters.find(c => c.number === chap.number);
                     if (!existingChap) {
@@ -576,21 +556,47 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
 
                 if (addedCount > 0) {
                     novel.chapters.sort((a, b) => a.number - b.number);
+                    shouldUpdateTimestamp = true; // Chapters added = Update
                     
-                    // If we added chapters, update the date ONLY if source date is NOT provided (fallback)
-                    if (!novelData.lastUpdate) {
-                        novel.lastChapterUpdate = new Date();
-                    }
-
                     // Reactivate if new chapters added and not completed
                     if (novel.status === 'متوقفة' && novel.sourceStatus !== 'مكتملة') {
                         novel.status = 'مستمرة';
                     }
-                    await novel.save();
                     await logScraper(`✅ تم حفظ ${addedCount} فصل جديد`, 'success');
                 }
             } 
 
+            // 🔥🔥 SMART TIMESTAMP UPDATE LOGIC 🔥🔥
+            // Only update lastChapterUpdate if:
+            // 1. New chapters were added (addedCount > 0)
+            // 2. OR source explicitly has a newer date than ours (for manual fixes)
+            if (shouldUpdateTimestamp) {
+                 if (novelData.lastUpdate) {
+                     const sourceDate = new Date(novelData.lastUpdate);
+                     // Only use source date if valid
+                     if (!isNaN(sourceDate.getTime())) {
+                         novel.lastChapterUpdate = sourceDate;
+                     } else {
+                         // Fallback to now only if new chapters added
+                         if (addedCount > 0) novel.lastChapterUpdate = new Date();
+                     }
+                 } else {
+                     // Fallback to now only if new chapters added
+                     if (addedCount > 0) novel.lastChapterUpdate = new Date();
+                 }
+            } else {
+                // If NO chapters added, check if Source Date is vastly different (maybe we missed an update?)
+                // But generally, DO NOT update timestamp if nothing changed.
+                if (novelData.lastUpdate) {
+                     const sourceDate = new Date(novelData.lastUpdate);
+                     if (!isNaN(sourceDate.getTime()) && sourceDate > novel.lastChapterUpdate) {
+                         novel.lastChapterUpdate = sourceDate;
+                         await logScraper(`📅 تم تحديث التاريخ فقط (مطابقة المصدر)`, 'info');
+                     }
+                }
+            }
+
+            await novel.save();
             res.json({ success: true, novelId: novel._id });
 
         } catch (error) {
@@ -600,7 +606,10 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Bulk Upload (Kept same)
+    // ... (Keep existing routes) ...
+    // Note: I am including the rest of the routes to ensure full file integrity as requested.
+    
+    // Bulk Upload
     app.post('/api/admin/chapters/bulk-upload', verifyAdmin, upload.single('zip'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ message: "No ZIP file uploaded" });
@@ -688,11 +697,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // ... (Keep existing User/Novel/Chapter management routes as they are) ...
-    // Note: I am not deleting the rest of the file, just showing the modified part and assuming the rest is appended in the real file or maintained. 
-    // To satisfy "Write Full Code", I will include the rest of standard CRUD routes below.
-
-    // Users Management
     app.get('/api/admin/users', verifyAdmin, async (req, res) => {
         if (req.user.role !== 'admin') return res.status(403).json({ message: "Access Denied" });
         try {
@@ -765,7 +769,6 @@ module.exports = function(app, verifyToken, verifyAdmin, upload) {
         }
     });
 
-    // Novels Management
     app.post('/api/admin/novels', verifyAdmin, async (req, res) => {
         try {
             const { title, titleEn, cover, description, category, tags, status } = req.body;
